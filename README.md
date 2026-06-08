@@ -13,6 +13,54 @@
 
 ---
 
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Why mcp-hub?](#why-mcp-hub)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Installation](#installation)
+- [Use mcp-hub in your client](#use-mcp-hub-in-your-client)
+- [Configuration](#configuration)
+- [Meta-tools](#meta-tools)
+- [Authentication](#authentication)
+- [Prompts & resources](#prompts--resources)
+- [Advanced MCP support](#advanced-mcp-support)
+- [CLI reference](#cli-reference)
+- [How it works](#how-it-works)
+- [File locations](#file-locations)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Releasing](#releasing)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
+## Quick start
+
+```bash
+# 1. Install (from Git — see Installation for options)
+uv tool install git+https://github.com/igrybkov/mcp-hub.git
+
+# 2. Describe your servers
+mkdir -p ~/.config/mcp-hub
+cat > ~/.config/mcp-hub/servers.yml <<'YAML'
+everything:
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-everything"]
+  description: "Reference MCP server for testing"
+  tags: [example]
+YAML
+
+# 3. Verify from the shell
+mcp-hub list
+mcp-hub tools everything --summary
+
+# 4. Register the hub with your client (writes .mcp.json by default)
+mcp-hub install
+```
+
+That's it — your host now talks to one server (`mcp-hub`), and `everything` only starts when the model actually calls one of its tools.
+
 ## Why mcp-hub?
 
 Connecting many MCP servers directly to a host has two costs that grow with every server you add:
@@ -67,51 +115,6 @@ Child servers stay dormant until a tool call (or an opt-in prompt/resource enume
 - **Hot reload** — add, remove, or edit servers and pick up the change with a single `reload`, no host restart.
 - **First-class CLI** — script everything (`list`, `tools`, `call`, `search`, `auth`, `install`) with JSON output.
 
-## Table of contents
-
-- [Quick start](#quick-start)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Meta-tools](#meta-tools)
-- [Authentication](#authentication)
-- [Prompts & resources](#prompts--resources)
-- [Advanced MCP support](#advanced-mcp-support)
-- [CLI reference](#cli-reference)
-- [Use mcp-hub in your client](#use-mcp-hub-in-your-client)
-- [How it works](#how-it-works)
-- [File locations](#file-locations)
-- [Development](#development)
-- [Releasing](#releasing)
-- [Contributing](#contributing)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
-
-## Quick start
-
-```bash
-# 1. Install (from Git — see Installation for options)
-uv tool install git+https://github.com/igrybkov/mcp-hub.git
-
-# 2. Describe your servers
-mkdir -p ~/.config/mcp-hub
-cat > ~/.config/mcp-hub/servers.yml <<'YAML'
-everything:
-  command: npx
-  args: ["-y", "@modelcontextprotocol/server-everything"]
-  description: "Reference MCP server for testing"
-  tags: [example]
-YAML
-
-# 3. Verify from the shell
-mcp-hub list
-mcp-hub tools everything --summary
-
-# 4. Register the hub with your client (writes .mcp.json by default)
-mcp-hub install
-```
-
-That's it — your host now talks to one server (`mcp-hub`), and `everything` only starts when the model actually calls one of its tools.
-
 ## Installation
 
 > **Note:** `mcp-hub` is not yet published to PyPI. Install from Git for now.
@@ -142,6 +145,56 @@ git clone https://github.com/igrybkov/mcp-hub.git
 cd mcp-hub
 uv sync --dev
 uv run mcp-hub list
+```
+
+## Use mcp-hub in your client
+
+### With the `install` command
+
+`install` writes (or updates) an `mcpServers` entry and **auto-detects the runner** from how you launched it. If you ran via `uvx --from <spec>`, it reuses the same `--from` spec so the generated entry matches exactly; otherwise it writes a plain `mcp-hub server`.
+
+```bash
+# Claude Code — project-level (.mcp.json in CWD, checked into the repo)
+mcp-hub install
+
+# User-level / other clients — point at any config file
+mcp-hub install --config ~/.mcp.json
+mcp-hub install --config ~/Library/Application\ Support/Claude/claude_desktop_config.json
+mcp-hub install --config ~/.cursor/mcp.json
+
+# Preview without writing
+mcp-hub install --config .mcp.json --dry-run
+
+# Force a specific runner ("mcp-hub server" is appended automatically)
+mcp-hub install --runner 'uvx --from git+https://github.com/igrybkov/mcp-hub.git'
+```
+
+### Manual configuration
+
+If you installed `mcp-hub` as a tool, the entry is simply:
+
+```json
+{
+  "mcpServers": {
+    "mcp-hub": {
+      "command": "mcp-hub",
+      "args": ["server"]
+    }
+  }
+}
+```
+
+To run straight from Git without a prior install:
+
+```json
+{
+  "mcpServers": {
+    "mcp-hub": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/igrybkov/mcp-hub.git", "mcp-hub", "server"]
+    }
+  }
+}
 ```
 
 ## Configuration
@@ -359,56 +412,6 @@ mcp-hub auth promote <server>
 mcp-hub install [--config PATH] [--name KEY] [--runner CMD] [--dry-run]
 ```
 
-## Use mcp-hub in your client
-
-### With the `install` command
-
-`install` writes (or updates) an `mcpServers` entry and **auto-detects the runner** from how you launched it. If you ran via `uvx --from <spec>`, it reuses the same `--from` spec so the generated entry matches exactly; otherwise it writes a plain `mcp-hub server`.
-
-```bash
-# Claude Code — project-level (.mcp.json in CWD, checked into the repo)
-mcp-hub install
-
-# User-level / other clients — point at any config file
-mcp-hub install --config ~/.mcp.json
-mcp-hub install --config ~/Library/Application\ Support/Claude/claude_desktop_config.json
-mcp-hub install --config ~/.cursor/mcp.json
-
-# Preview without writing
-mcp-hub install --config .mcp.json --dry-run
-
-# Force a specific runner ("mcp-hub server" is appended automatically)
-mcp-hub install --runner 'uvx --from git+https://github.com/igrybkov/mcp-hub.git'
-```
-
-### Manual configuration
-
-If you installed `mcp-hub` as a tool, the entry is simply:
-
-```json
-{
-  "mcpServers": {
-    "mcp-hub": {
-      "command": "mcp-hub",
-      "args": ["server"]
-    }
-  }
-}
-```
-
-To run straight from Git without a prior install:
-
-```json
-{
-  "mcpServers": {
-    "mcp-hub": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/igrybkov/mcp-hub.git", "mcp-hub", "server"]
-    }
-  }
-}
-```
-
 ## How it works
 
 A few design choices worth knowing:
@@ -443,17 +446,6 @@ uv run pre-commit install
 
 The **Build & Test** workflow (GitHub Actions) runs `ruff check`, `ruff format --check`, and `pytest` on every push and pull request to `main`.
 
-## Releasing
-
-Releases are fully automated with [python-semantic-release](https://python-semantic-release.readthedocs.io/) driven by [Conventional Commits](https://www.conventionalcommits.org/). When **Build & Test** passes on `main`, the **Publish** workflow computes the next version from commit messages, updates the changelog and version, tags the release, publishes a GitHub release, and uploads the package to GitHub Packages.
-
-Commit message prefixes that affect versioning:
-
-- `fix:` → patch release
-- `feat:` → minor release
-- `feat!:` / `BREAKING CHANGE:` → major release
-- `chore:`, `docs:`, `refactor:`, `test:`, … → no release
-
 ## Contributing
 
 Contributions are welcome! Please:
@@ -462,6 +454,17 @@ Contributions are welcome! Please:
 2. Keep PRs focused, and add or update tests where it makes sense.
 3. Use Conventional Commit messages (they drive the automated release).
 4. Make sure `uv run ruff check .`, `uv run ruff format --check .`, and `uv run pytest` pass before opening a PR.
+
+## Releasing
+
+Releases are fully automated with [python-semantic-release](https://python-semantic-release.readthedocs.io/) driven by [Conventional Commits](https://www.conventionalcommits.org/). When **Build & Test** passes on `main`, the **Publish** workflow computes the next version from commit messages, updates the changelog and version, tags the release, publishes a GitHub release, and attaches the built wheel and sdist to it as release assets.
+
+Commit message prefixes that affect versioning:
+
+- `fix:` → patch release
+- `feat:` → minor release
+- `feat!:` / `BREAKING CHANGE:` → major release
+- `chore:`, `docs:`, `refactor:`, `test:`, … → no release
 
 ## Troubleshooting
 
