@@ -13,7 +13,8 @@ def build_instructions(servers: dict[str, ServerSpec]) -> str:
         return (
             "MCP Hub — aggregator for child MCP servers. No servers are currently "
             "configured. Add servers to ~/.config/mcp-hub/servers.yml or a local "
-            ".mcp.local.json/.mcp.local.yml in the project root."
+            ".mcp.local.json/.mcp.local.yml in the project root. Run `mcp-hub skill "
+            "show` for a step-by-step guide to finding, adding, and managing servers."
         )
 
     exposed = [s for s in servers.values() if s.is_exposed]
@@ -58,6 +59,9 @@ def build_instructions(servers: dict[str, ServerSpec]) -> str:
             "  mcp-hub tools <server> [--summary]",
             "  mcp-hub call <server> <tool> --args '<json>'",
             "  mcp-hub search <query>",
+            "",
+            "To find, add, or manage servers in this hub, run `mcp-hub skill show` "
+            "for a step-by-step guide.",
         ]
     )
     return "\n".join(lines)

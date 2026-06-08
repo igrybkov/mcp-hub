@@ -21,7 +21,9 @@
 - [Features](#features)
 - [Installation](#installation)
 - [Use mcp-hub in your client](#use-mcp-hub-in-your-client)
+- [Agent skill](#agent-skill)
 - [Configuration](#configuration)
+- [Managing servers (agent workflow)](#managing-servers-agent-workflow)
 - [Meta-tools](#meta-tools)
 - [Authentication](#authentication)
 - [Prompts & resources](#prompts--resources)
@@ -113,7 +115,8 @@ Child servers stay dormant until a tool call (or an opt-in prompt/resource enume
 - **Full capability relay** — bidirectional sampling, elicitation, roots, logging, and completions pass through transparently.
 - **Three transports** — `stdio`, `streamable-http`, and `sse` children.
 - **Hot reload** — add, remove, or edit servers and pick up the change with a single `reload`, no host restart.
-- **First-class CLI** — script everything (`list`, `tools`, `call`, `search`, `auth`, `install`) with JSON output.
+- **First-class CLI** — script everything (`list`, `tools`, `call`, `search`, `auth`, `add`, `validate`, `install`) with JSON output.
+- **Bundled agent skill** — ships a "managing MCP servers" skill so an assistant can add, configure, and troubleshoot servers from a vendor's docs; install it with `mcp-hub skill install`.
 
 ## Installation
 
@@ -197,6 +200,27 @@ To run straight from Git without a prior install:
 }
 ```
 
+## Agent skill
+
+`mcp-hub` ships a bundled [agent skill](https://docs.claude.com/en/docs/agents-and-tools/agent-skills/overview) that teaches an assistant the full lifecycle of managing servers — discover/search, add & configure from a vendor's docs (secrets to the keychain, never inline), authenticate, reload, verify, and troubleshoot. With it installed, you can just say *"add the MongoDB MCP to mcp-hub: <docs URL>"* or *"find me an MCP server for Postgres"* and the agent knows the rest.
+
+```bash
+# Install for Claude (default) — writes ./.claude/skills/mcp-hub/
+mcp-hub skill install
+
+# Install for Cursor — writes ./.cursor/skills/mcp-hub/
+mcp-hub skill install --client cursor
+
+# Or an explicit directory
+mcp-hub skill install --dir ~/.config/skills
+
+# Print the guide to stdout (no install) — pull it on demand or pipe to a file
+mcp-hub skill show
+mcp-hub skill list
+```
+
+The skill travels inside the package, so every install has it. It's also surfaced to the model automatically: the hub's instructions always point at `mcp-hub skill show`.
+
 ## Configuration
 
 Servers are described in JSON or YAML. By default the hub merges these sources, in order, with **later sources overriding earlier ones by server name**:
@@ -268,6 +292,31 @@ legacy:
 | `expose_resources` | bool | all | `false` | Surface the child's resources/templates through the hub. |
 | `connect_timeout_seconds` | number | exposed | `5.0` | Per-server connect + enumerate budget. Raise for slow/Docker cold starts. |
 | `auth.secrets` | list | all | — | Secret schema for keychain injection (see [Authentication](#authentication)). |
+
+## Managing servers (agent workflow)
+
+You rarely need to hand-edit config. `mcp-hub add` translates a vendor's docs snippet into the hub's shape and **moves likely-secret env vars into the keychain schema automatically** (the rule below), `validate` lints before you reload, and `config path` shows where things get written. The bundled [agent skill](#agent-skill) drives the whole flow.
+
+```bash
+mcp-hub config path        # resolved sources + the file `add` writes to
+
+# Translate a docs snippet (wrapped or single-entry). Secret env vars matching
+# *TOKEN/KEY/SECRET/PASSWORD/CONNECTION_STRING* (with a real value) are moved to
+# auth.secrets and their raw values dropped; --keep-env-secrets opts out.
+mcp-hub add mongodb \
+  --from-json '{"mcpServers":{"MongoDB":{"command":"npx","args":["-y","mongodb-mcp-server@latest"],"env":{"MDB_MCP_CONNECTION_STRING":"mongodb+srv://user:pass@host/db"}}}}' \
+  --arg --readOnly --description "MongoDB / Atlas" --tag database
+
+# Or build from flags (no snippet):
+mcp-hub add linear --command npx --arg -y --arg linear-mcp-server \
+  --secret 'LINEAR_API_KEY:Linear API key:https://linear.app/settings/api'
+
+mcp-hub auth provision mongodb   # store the secret(s) in the keychain
+mcp-hub validate                 # lint; flags any raw secrets left in env/headers
+# …then call the `reload` tool (or restart the host) and verify with `list`/`tools`/`call`.
+```
+
+**Secret-vs-env rule** — API keys, tokens, passwords, client secrets, and connection strings with embedded credentials belong in `auth.secrets` (keychain). Base URLs, hostnames, account/team IDs, emails, regions, and flags stay in plaintext `env`/`headers`. Run `mcp-hub skill show` for the full guide.
 
 ## Meta-tools
 
@@ -407,6 +456,16 @@ mcp-hub auth status [--server <name>]
 mcp-hub auth provision <server> | --all [--force]
 mcp-hub auth rm <server> [<ENV_VAR>]
 mcp-hub auth promote <server>
+
+# Manage config (see "Managing servers" above)
+mcp-hub config path                   # resolved sources + write target
+mcp-hub add <name> [--from-json '<snippet>'] [flags] [--dry-run]
+mcp-hub validate [--config PATH]      # lint specs; non-zero exit on error
+
+# Bundled agent skill
+mcp-hub skill show [name]             # print SKILL.md to stdout (default: mcp-hub)
+mcp-hub skill list                    # list bundled skills
+mcp-hub skill install [name] [--client claude|cursor] [--dir PATH] [--force]
 
 # Install into a client config
 mcp-hub install [--config PATH] [--name KEY] [--runner CMD] [--dry-run]
