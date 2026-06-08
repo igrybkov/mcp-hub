@@ -21,8 +21,6 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
-      id-token: write
-      packages: write
     steps:
       - uses: actions/checkout@v6.0.3
         with:
@@ -51,11 +49,3 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ steps.release.outputs.tag }}
-
-      - name: Publish to GitHub Packages
-        if: steps.release.outputs.released == 'true'
-        run: |
-          uv publish \
-            --index-url https://upload.pkg.github.com/ \
-            --username ${{ github.repository_owner }} \
-            --password ${{ secrets.GITHUB_TOKEN }}

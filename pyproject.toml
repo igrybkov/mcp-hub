@@ -9,6 +9,9 @@ description = "MCP aggregator hub — lazy proxy, discovery, and CLI for child M
 readme = "README.md"
 requires-python = ">=3.11"
 classifiers = [
+  # Hard guard: PyPI/TestPyPI reject any upload carrying a "Private ::" classifier.
+  # This package is distributed via Git + GitHub Releases, never PyPI.
+  "Private :: Do Not Upload",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
