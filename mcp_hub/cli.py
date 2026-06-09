@@ -466,19 +466,24 @@ def cmd_auth_provision(server: str | None, all_servers: bool, force: bool) -> No
             existing = get_secret(name, secret.env_var)
             if existing is not None and not force:
                 click.echo(f"  {secret.label} ({secret.env_var}): already stored [skip]")
+                if secret.create_url:
+                    click.echo(f"    Create one at: {secret.create_url}")
                 continue
-            if existing is not None:
-                click.echo(
-                    f"  {secret.label} ({secret.env_var}): already stored"
-                    " — leave empty to keep current value"
+            has_header = existing is not None or bool(secret.create_url)
+            if has_header:
+                suffix = (
+                    ": already stored — leave empty to keep current value"
+                    if existing is not None
+                    else ""
                 )
-            if secret.create_url:
-                click.echo(f"  {secret.label} ({secret.env_var})")
-                click.echo(f"    Create one at: {secret.create_url}")
+                click.echo(f"  {secret.label} ({secret.env_var}){suffix}")
+                if secret.create_url:
+                    click.echo(f"    Create one at: {secret.create_url}")
+            prompt_label = "New value" if has_header else f"Enter {secret.label}"
             if secret.sensitive:
-                value = getpass.getpass(f"  Enter {secret.label}: ")
+                value = getpass.getpass(f"  {prompt_label}: ")
             else:
-                value = click.prompt(f"  Enter {secret.label}")
+                value = click.prompt(f"  {prompt_label}")
             if value:
                 set_secret(name, secret.env_var, value)
                 click.echo("  Stored ✓")
