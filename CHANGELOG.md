@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.2.1 (2026-06-09)
+
+### Bug Fixes
+
+- **auth**: Clarify empty input keeps current value on --force provision
+  ([`5bf268a`](https://github.com/igrybkov/mcp-hub/commit/5bf268ae7513fec0cc4788c9dc81167e89909037))
+
+
 ## v0.2.0 (2026-06-08)
 
 ### Continuous Integration
