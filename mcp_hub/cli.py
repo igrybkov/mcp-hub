@@ -468,7 +468,10 @@ def cmd_auth_provision(server: str | None, all_servers: bool, force: bool) -> No
                 click.echo(f"  {secret.label} ({secret.env_var}): already stored [skip]")
                 continue
             if existing is not None:
-                click.echo(f"  {secret.label} ({secret.env_var}): already stored [overwriting]")
+                click.echo(
+                    f"  {secret.label} ({secret.env_var}): already stored"
+                    " — leave empty to keep current value"
+                )
             if secret.create_url:
                 click.echo(f"  {secret.label} ({secret.env_var})")
                 click.echo(f"    Create one at: {secret.create_url}")
