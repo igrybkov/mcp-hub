@@ -18,7 +18,6 @@ Examples:
 from __future__ import annotations
 
 import asyncio
-import getpass
 import importlib.resources
 import json
 import logging
@@ -51,6 +50,55 @@ def _print(payload: Any) -> None:
 def _die(msg: str, code: int = 1) -> None:
     click.echo(f"error: {msg}", err=True)
     sys.exit(code)
+
+
+def _prompt_secret(prompt: str) -> str:
+    """Read a secret without echo, in raw mode, to avoid the MAX_CANON hang.
+
+    ``getpass``/canonical mode caps a single input line at the kernel's
+    ``MAX_CANON`` (~1023 bytes on macOS). Pasting a longer token (a JWT, an
+    Argo bearer token) overflows that buffer: the trailing newline is dropped
+    and the read blocks forever waiting for input that already arrived. Reading
+    one byte at a time in raw mode (no ``ICANON``) sidesteps the limit.
+
+    Falls back to a plain line read when stdin is not a TTY (piped input,
+    ``--all`` from a script).
+    """
+    sys.stdout.write(f"{prompt}: ")
+    sys.stdout.flush()
+
+    if not sys.stdin.isatty():
+        return sys.stdin.readline().rstrip("\r\n")
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    chars: list[str] = []
+    try:
+        # TCSANOW: switch immediately without flushing input already buffered
+        # from a fast paste between writing the prompt and this call.
+        tty.setraw(fd, termios.TCSANOW)
+        while True:
+            ch = os.read(fd, 1).decode("utf-8", errors="replace")
+            if ch in ("\r", "\n"):
+                break
+            if ch in ("\x7f", "\x08"):  # DEL / backspace
+                if chars:
+                    chars.pop()
+            elif ch == "\x03":  # Ctrl-C
+                raise KeyboardInterrupt
+            elif ch == "\x04" and not chars:  # Ctrl-D on an empty line
+                break
+            elif ch >= " ":
+                chars.append(ch)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    return "".join(chars)
 
 
 def _run_async(coro, *, server: str | None = None) -> Any:
@@ -481,7 +529,7 @@ def cmd_auth_provision(server: str | None, all_servers: bool, force: bool) -> No
                     click.echo(f"    Create one at: {secret.create_url}")
             prompt_label = "New value" if has_header else f"Enter {secret.label}"
             if secret.sensitive:
-                value = getpass.getpass(f"  {prompt_label}: ")
+                value = _prompt_secret(f"  {prompt_label}")
             else:
                 value = click.prompt(f"  {prompt_label}")
             if value:

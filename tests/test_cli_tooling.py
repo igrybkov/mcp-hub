@@ -361,3 +361,22 @@ def test_skill_install_copies_files(runner, tmp_path):
     assert again.exit_code != 0
     forced = runner.invoke(main, ["skill", "install", "--dir", str(dest), "--force"])
     assert forced.exit_code == 0
+
+
+def test_prompt_secret_reads_long_token_without_truncation(monkeypatch):
+    """A token longer than the kernel MAX_CANON line buffer must round-trip.
+
+    Regression for the canonical-mode hang: a long pasted JWT/Argo token would
+    overflow the ~1023-byte line buffer and drop its trailing newline. We read
+    in raw mode (or, here, a non-TTY line read), so the full value comes back.
+    """
+    import io
+
+    from mcp_hub.cli import _prompt_secret
+
+    token = "x" * 4096
+    fake_stdin = io.StringIO(f"{token}\n")
+    fake_stdin.isatty = lambda: False  # type: ignore[method-assign]
+    monkeypatch.setattr("mcp_hub.cli.sys.stdin", fake_stdin)
+
+    assert _prompt_secret("  Enter Token") == token
