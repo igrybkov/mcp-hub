@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.2.2 (2026-06-10)
+
+### Bug Fixes
+
+- **auth**: Read provisioned secrets in raw mode to avoid MAX_CANON hang
+  ([`382ce5b`](https://github.com/igrybkov/mcp-hub/commit/382ce5b3332c19f38724583eaded06a69afa023b))
+
+### Refactoring
+
+- **auth**: Compact provision output and show create_url in all cases
+  ([`4b03144`](https://github.com/igrybkov/mcp-hub/commit/4b031443df6a3de657e700418ad3638f34633634))
+
+
 ## v0.2.1 (2026-06-09)
 
 ### Bug Fixes
