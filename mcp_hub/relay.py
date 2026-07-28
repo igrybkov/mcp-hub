@@ -70,6 +70,13 @@ def make_elicitation_callback(state: HubState, server_name: str):
 
     Forwards `elicitation/create` requests to the host. Same failure-mode
     rules as sampling.
+
+    `ElicitRequestParams` is a union: form-mode carries `requested_schema`,
+    URL-mode carries `url` + `elicitation_id`, and only `mode` is common. Both
+    variants have to be routed to their matching host method — reading
+    `requested_schema` unconditionally raised `AttributeError` on every
+    URL-mode request, which the catch-all below then reported to the child as
+    a generic forward failure.
     """
 
     async def callback(
@@ -83,6 +90,12 @@ def make_elicitation_callback(state: HubState, server_name: str):
                 message="mcp-hub: host session not yet connected",
             )
         try:
+            if params.mode == "url":
+                return await host.elicit_url(
+                    message=params.message,
+                    url=params.url,
+                    elicitation_id=params.elicitation_id,
+                )
             return await host.elicit_form(
                 message=params.message,
                 requested_schema=params.requested_schema,

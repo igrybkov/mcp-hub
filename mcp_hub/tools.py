@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from mcp import types
+from mcp.shared.exceptions import UrlElicitationRequiredError
 
 from mcp_hub.config import ServerSpec, compute_config_hash, load_servers
 from mcp_hub.proxy import ProxyClient
@@ -582,6 +583,12 @@ async def handle_tool(
             return _text({"error": f"unknown server: {server}"})
         try:
             result = await proxy.call_tool(server, tool, tool_args)
+        except UrlElicitationRequiredError:
+            # Protocol-level signal, not a tool failure: the SDK turns it into
+            # a -32042 response the host knows how to act on. Reporting it as
+            # `{"error": ...}` text would strip that meaning, and it would
+            # never reach server.py's deliberate re-raise.
+            raise
         except Exception as e:
             logger.exception("call_tool failed for %s/%s", server, tool)
             return _text({"error": f"call_tool failed: {e}"})
