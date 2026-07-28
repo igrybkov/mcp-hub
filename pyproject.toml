@@ -33,10 +33,11 @@ mcp-hub = "mcp_hub.cli:main"
 dev = [
   "pytest~=9.0",
   "pytest-asyncio~=1.0",
-  # Three segments on purpose: ~=0.15 would only cap at <1.0. Keep this minor in
-  # lockstep with the ruff-pre-commit `rev` in .pre-commit-config.yaml, or CI's
-  # `ruff format --check` drifts from what the hook considers clean.
-  "ruff~=0.15.0",
+  # Three segments on purpose: a two-segment ~=0.16 would only cap at <1.0, and
+  # pre-1.0 ruff minors promote lint rules and change formatter style. Keep this
+  # minor in lockstep with the ruff-pre-commit `rev` in .pre-commit-config.yaml,
+  # or CI's `ruff format --check` drifts from what the hook considers clean.
+  "ruff~=0.16.0",
   "pre-commit~=4.0",
 ]
 
