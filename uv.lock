@@ -447,6 +447,7 @@ name = "mcp-hub"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
+    { name = "httpx2" },
     { name = "keyring" },
     { name = "mcp" },
     { name = "python-dotenv" },
@@ -464,6 +465,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = "~=8.1" },
+    { name = "httpx2", specifier = "~=2.9" },
     { name = "keyring", specifier = "~=25.0" },
     { name = "mcp", specifier = "~=2.0" },
     { name = "python-dotenv", specifier = "~=1.0" },

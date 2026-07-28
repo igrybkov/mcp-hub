@@ -25,11 +25,11 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+import httpx2
 from mcp import ClientSession, MCPError, StdioServerParameters, types
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
 
 from mcp_hub.config import ServerSpec
 
@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 
 METHOD_NOT_FOUND = -32601  # JSON-RPC standard code
+
+# Mirrors mcp.shared._httpx_utils. Copied rather than imported because that
+# module is private; `tests/test_proxy.py` asserts these still match the SDK's,
+# so drift shows up as a failing test rather than as wrong timeouts in prod.
+MCP_DEFAULT_TIMEOUT = 30.0
+MCP_DEFAULT_SSE_READ_TIMEOUT = 300.0
 
 # Factory returning ClientSession kwargs (callbacks) for a given server name.
 # Example: logging_callback, sampling_callback, elicitation_callback, etc.
@@ -124,6 +130,24 @@ class _SseAdapter(_StdioAdapter):
     """Same shape as stdio — already yields (read, write)."""
 
 
+def _build_http_client(headers: dict[str, str]) -> httpx2.AsyncClient:
+    """Build the httpx client the streamable-http transport will borrow.
+
+    Reproduces `mcp.shared._httpx_utils.create_mcp_http_client`, which the SDK
+    keeps private. All three settings are load-bearing: httpx2 defaults
+    `follow_redirects` to False, and its default 5s read timeout would cut off
+    long-lived SSE streams.
+
+    Kept honest by `tests/test_proxy.py::test_http_client_matches_sdk_defaults`
+    — don't delete that test without replacing the guarantee.
+    """
+    return httpx2.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx2.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT),
+        headers=headers,
+    )
+
+
 class _HttpAdapter:
     """`streamable_http_client` yields (read, write).
 
@@ -136,10 +160,6 @@ class _HttpAdapter:
 
     With no headers we pass nothing, letting the transport create and manage
     its own client with the SDK's recommended MCP timeouts.
-
-    `create_mcp_http_client` lives in a private module, but it is the SDK's own
-    default for `sse_client`'s public `httpx_client_factory`, and it is what
-    supplies those timeouts. Re-check it on the next 2.x bump.
     """
 
     def __init__(self, url: str, headers: dict[str, str] | None) -> None:
@@ -150,7 +170,7 @@ class _HttpAdapter:
 
     async def __aenter__(self):
         if self._headers:
-            self._client = create_mcp_http_client(headers=self._headers)
+            self._client = _build_http_client(self._headers)
             await self._client.__aenter__()
         try:
             self._cm = streamable_http_client(self._url, http_client=self._client)
@@ -348,7 +368,11 @@ class ProxyClient:
 
 
 def _is_method_not_found(err: MCPError) -> bool:
-    """Treat `method not found` as "this server doesn't support the primitive.\""""
-    data = getattr(err, "error", None)
-    code = getattr(data, "code", None) if data is not None else None
-    return code == METHOD_NOT_FOUND
+    """Treat `method not found` as "this server doesn't support the primitive."
+
+    Reads the public `MCPError.code` rather than probing for `.error` with
+    `getattr` defaults. Five call sites use this to degrade gracefully to an
+    empty list; under the old defaulting form an SDK rename would have made
+    every one of them silently start raising instead.
+    """
+    return err.code == METHOD_NOT_FOUND
