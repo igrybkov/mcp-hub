@@ -21,7 +21,7 @@ classifiers = [
 dependencies = [
   "click~=8.1",
   "keyring~=25.0",
-  "mcp~=1.2",
+  "mcp~=2.0",
   "python-dotenv~=1.0",
   "pyyaml~=6.0",
 ]

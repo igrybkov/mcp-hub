@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 
 from mcp import types
-from mcp.server.lowlevel.server import request_ctx
 
 from mcp_hub.namespace import (
     NamespaceError,
@@ -29,7 +28,6 @@ async def handle_list_prompts(state: HubState) -> list[types.Prompt]:
     Late-arriving servers push updates via `prompts/list_changed` so the host
     re-fetches and sees the full set.
     """
-    _capture_session(state)
     await state.wait_for_cold_start_settle()
 
     prompts: list[types.Prompt] = []
@@ -53,7 +51,6 @@ async def handle_list_prompts(state: HubState) -> list[types.Prompt]:
 async def handle_get_prompt(
     state: HubState, encoded_name: str, arguments: dict[str, str] | None
 ) -> types.GetPromptResult:
-    _capture_session(state)
     try:
         server_name, prompt_name = decode_prompt_name(encoded_name)
     except NamespaceError as exc:
@@ -62,11 +59,3 @@ async def handle_get_prompt(
     if server_name not in state.servers:
         raise ValueError(f"unknown server: {server_name!r}")
     return await state.proxy.get_prompt(server_name, prompt_name, arguments)
-
-
-def _capture_session(state: HubState) -> None:
-    try:
-        ctx = request_ctx.get()
-    except LookupError:
-        return
-    state.capture_host_session(ctx.session)

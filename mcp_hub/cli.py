@@ -338,7 +338,7 @@ def cmd_tools(server: str, summary: bool, tool_names: tuple[str, ...]) -> None:
                     {
                         "name": t.name,
                         "description": t.description or "",
-                        "inputSchema": t.inputSchema,
+                        "inputSchema": t.input_schema,
                     }
                     for t in tools
                 ],
@@ -354,7 +354,7 @@ def cmd_tools(server: str, summary: bool, tool_names: tuple[str, ...]) -> None:
                 {
                     "name": t.name,
                     "description": t.description or "",
-                    "inputSchema": t.inputSchema,
+                    "inputSchema": t.input_schema,
                 }
                 for t in tools
             ],
@@ -387,7 +387,7 @@ def cmd_call(server: str, tool: str, args_json: str | None, args_file: str | Non
         return {
             "server": server,
             "tool": tool,
-            "isError": bool(result.isError),
+            "isError": bool(result.is_error),
             "content": content,
         }
 
