@@ -2,6 +2,48 @@
 
 <!-- version list -->
 
+## v1.0.0 (2026-07-29)
+
+### Bug Fixes
+
+- **proxy**: Build the HTTP client without a private SDK import
+  ([`7d7dece`](https://github.com/igrybkov/mcp-hub/commit/7d7dece6e2eabd6889e9b27a783aa697a42a4c5a))
+
+- **relay**: Forward URL-mode elicitation instead of failing on it
+  ([`dbb1a67`](https://github.com/igrybkov/mcp-hub/commit/dbb1a674b084575e463dfdc5bb60c350031afff8))
+
+### Documentation
+
+- Note the mcp 2.0 handler and request-context model
+  ([`d1a770b`](https://github.com/igrybkov/mcp-hub/commit/d1a770b9ee670871a8480fdbcd246fb5cf748eeb))
+
+### Features
+
+- Migrate to the mcp 2.0 SDK
+  ([`164a298`](https://github.com/igrybkov/mcp-hub/commit/164a298a47b4175de4af69dac30b3b07e74b2dde))
+
+### Refactoring
+
+- **server**: Extract build_app so the handlers are testable
+  ([`8061df4`](https://github.com/igrybkov/mcp-hub/commit/8061df42a287a6cbc5c857f368fa8a5133ceabc8))
+
+### Testing
+
+- Cover catalog, tool schemas, fan-out, completions and startup
+  ([`a587167`](https://github.com/igrybkov/mcp-hub/commit/a5871670a3c4c2068da270ce296272108df981de))
+
+- Cover proxy transports and method-not-found degradation
+  ([`747b14b`](https://github.com/igrybkov/mcp-hub/commit/747b14b40ef5bea92b440aa14c3e7b338ab4388b))
+
+- Cover the alias-sensitive relay and resource handlers
+  ([`9dec140`](https://github.com/igrybkov/mcp-hub/commit/9dec140c52596ec856e5ba17a309b443ff3f979d))
+
+### Breaking Changes
+
+- Requires mcp >= 2.0. Hosts and child servers are unaffected (the wire protocol is unchanged), but
+  the hub no longer runs against mcp 1.x.
+
+
 ## v0.2.2 (2026-06-10)
 
 ### Bug Fixes
