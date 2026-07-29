@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from mcp import McpError, types
+from mcp import MCPError, types
 
 from mcp_hub.proxy import _is_method_not_found
 from mcp_hub.state import HubState
@@ -69,7 +69,7 @@ async def handle_set_logging_level(state: HubState, level: types.LoggingLevel) -
         try:
             await holder.session.set_logging_level(level)
             forwarded += 1
-        except McpError as exc:
+        except MCPError as exc:
             if _is_method_not_found(exc):
                 logger.debug("%r has no logging capability, skipping", name)
                 continue

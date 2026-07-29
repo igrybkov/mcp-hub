@@ -7,7 +7,7 @@ import logging
 from typing import Any
 
 from mcp import types
-from mcp.server.lowlevel.server import request_ctx
+from mcp.shared.exceptions import UrlElicitationRequiredError
 
 from mcp_hub.config import ServerSpec, compute_config_hash, load_servers
 from mcp_hub.proxy import ProxyClient
@@ -238,7 +238,7 @@ def _tool_full(tool: types.Tool) -> dict[str, Any]:
     return {
         "name": tool.name,
         "description": tool.description or "",
-        "inputSchema": tool.inputSchema,
+        "inputSchema": tool.input_schema,
     }
 
 
@@ -257,14 +257,6 @@ async def _handle_reload(
     """Reconcile the live server set against config files and/or drop caches."""
     # `servers` is shared by reference with ProxyClient — mutating in place
     # is visible to subsequent tool calls.
-
-    # Capture host session up-front so notifications flush now instead of buffering.
-    if state is not None:
-        try:
-            ctx = request_ctx.get()
-            state.capture_host_session(ctx.session)
-        except LookupError:
-            pass
 
     target = arguments.get("server")
     if target is not None:
@@ -385,14 +377,6 @@ async def _handle_authenticate(
     force = bool(arguments.get("force", False))
     spec = servers[server_name]
 
-    # Capture host session
-    if state is not None:
-        try:
-            ctx = request_ctx.get()
-            state.capture_host_session(ctx.session)
-        except LookupError:
-            pass
-
     auth = resolve_auth(server_name, spec.auth)
     source = "declared"
 
@@ -471,7 +455,7 @@ async def _handle_authenticate(
             message += f"\n\nCreate one at: {secret.create_url}"
 
         try:
-            result = await host.elicit_form(message=message, requestedSchema=schema)
+            result = await host.elicit_form(message=message, requested_schema=schema)
             # result is ElicitResult with action and content
             action = getattr(result, "action", None)
             if action == "cancel":
@@ -599,6 +583,12 @@ async def handle_tool(
             return _text({"error": f"unknown server: {server}"})
         try:
             result = await proxy.call_tool(server, tool, tool_args)
+        except UrlElicitationRequiredError:
+            # Protocol-level signal, not a tool failure: the SDK turns it into
+            # a -32042 response the host knows how to act on. Reporting it as
+            # `{"error": ...}` text would strip that meaning, and it would
+            # never reach server.py's deliberate re-raise.
+            raise
         except Exception as e:
             logger.exception("call_tool failed for %s/%s", server, tool)
             return _text({"error": f"call_tool failed: {e}"})
@@ -609,7 +599,7 @@ async def handle_tool(
                 passthrough.append(block)
             else:
                 passthrough.append(types.TextContent(type="text", text=str(block)))
-        if result.isError:
+        if result.is_error:
             passthrough.insert(0, types.TextContent(type="text", text="[tool reported error]"))
         return passthrough
 

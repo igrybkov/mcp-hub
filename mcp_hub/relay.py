@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from mcp import types
-from mcp.shared.context import RequestContext
+from mcp.client.session import ClientRequestContext
 
 from mcp_hub.state import HubState
 
@@ -33,7 +33,7 @@ def make_sampling_callback(state: HubState, server_name: str):
     """
 
     async def callback(
-        ctx: RequestContext,
+        ctx: ClientRequestContext,
         params: types.CreateMessageRequestParams,
     ) -> types.CreateMessageResult | types.CreateMessageResultWithTools | types.ErrorData:
         host = state.host_session
@@ -45,15 +45,15 @@ def make_sampling_callback(state: HubState, server_name: str):
         try:
             return await host.create_message(
                 messages=list(params.messages),
-                max_tokens=params.maxTokens,
-                system_prompt=params.systemPrompt,
-                include_context=params.includeContext,
+                max_tokens=params.max_tokens,
+                system_prompt=params.system_prompt,
+                include_context=params.include_context,
                 temperature=params.temperature,
-                stop_sequences=params.stopSequences,
+                stop_sequences=params.stop_sequences,
                 metadata=params.metadata,
-                model_preferences=params.modelPreferences,
+                model_preferences=params.model_preferences,
                 tools=params.tools,
-                tool_choice=params.toolChoice,
+                tool_choice=params.tool_choice,
             )
         except Exception as exc:
             logger.warning("sampling relay failed for %r: %s", server_name, exc)
@@ -70,10 +70,17 @@ def make_elicitation_callback(state: HubState, server_name: str):
 
     Forwards `elicitation/create` requests to the host. Same failure-mode
     rules as sampling.
+
+    `ElicitRequestParams` is a union: form-mode carries `requested_schema`,
+    URL-mode carries `url` + `elicitation_id`, and only `mode` is common. Both
+    variants have to be routed to their matching host method — reading
+    `requested_schema` unconditionally raised `AttributeError` on every
+    URL-mode request, which the catch-all below then reported to the child as
+    a generic forward failure.
     """
 
     async def callback(
-        ctx: RequestContext,
+        ctx: ClientRequestContext,
         params: types.ElicitRequestParams,
     ) -> types.ElicitResult | types.ErrorData:
         host = state.host_session
@@ -83,9 +90,15 @@ def make_elicitation_callback(state: HubState, server_name: str):
                 message="mcp-hub: host session not yet connected",
             )
         try:
+            if params.mode == "url":
+                return await host.elicit_url(
+                    message=params.message,
+                    url=params.url,
+                    elicitation_id=params.elicitation_id,
+                )
             return await host.elicit_form(
                 message=params.message,
-                requestedSchema=params.requestedSchema,
+                requested_schema=params.requested_schema,
             )
         except Exception as exc:
             logger.warning("elicitation relay failed for %r: %s", server_name, exc)

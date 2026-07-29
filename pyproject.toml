@@ -20,8 +20,12 @@ classifiers = [
 ]
 dependencies = [
   "click~=8.1",
+  # Direct because proxy.py constructs its own AsyncClient: mcp 2.0's
+  # streamable-http transport takes a client instead of a `headers=` argument.
+  # Already present transitively via mcp (whose floor is >=2.5.0).
+  "httpx2~=2.9",
   "keyring~=25.0",
-  "mcp~=1.2",
+  "mcp~=2.0",
   "python-dotenv~=1.0",
   "pyyaml~=6.0",
 ]
@@ -33,10 +37,11 @@ mcp-hub = "mcp_hub.cli:main"
 dev = [
   "pytest~=9.0",
   "pytest-asyncio~=1.0",
-  # Three segments on purpose: ~=0.15 would only cap at <1.0. Keep this minor in
-  # lockstep with the ruff-pre-commit `rev` in .pre-commit-config.yaml, or CI's
-  # `ruff format --check` drifts from what the hook considers clean.
-  "ruff~=0.15.0",
+  # Three segments on purpose: a two-segment ~=0.16 would only cap at <1.0, and
+  # pre-1.0 ruff minors promote lint rules and change formatter style. Keep this
+  # minor in lockstep with the ruff-pre-commit `rev` in .pre-commit-config.yaml,
+  # or CI's `ruff format --check` drifts from what the hook considers clean.
+  "ruff~=0.16.0",
   "pre-commit~=4.0",
 ]
 
