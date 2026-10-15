@@ -142,7 +142,8 @@ def get_hub_tools() -> list[types.Tool]:
                 "infer it. Uses MCP elicitation so secrets never enter the assistant's "
                 "context. After storing, the server session is refreshed automatically. "
                 "Set force=true to re-collect and overwrite secrets that are already "
-                "stored (e.g. rotated or expired keys)."
+                "stored (e.g. rotated or expired keys). Command-managed secrets are "
+                "never prompted for, including with force=true."
             ),
             inputSchema={
                 "type": "object",
@@ -164,7 +165,9 @@ def get_hub_tools() -> list[types.Tool]:
             name="auth_status",
             description=(
                 "Show authentication status for one or all servers with auth schemas. "
-                "Returns per-server status: authenticated, partial, or unauthenticated."
+                "Returns per-server status: authenticated, configured, partial, or "
+                "unauthenticated. Configured means command sources are registered but "
+                "unverified. Does not execute credential commands."
             ),
             inputSchema={
                 "type": "object",
@@ -373,6 +376,7 @@ async def _handle_authenticate(
         auth_status as get_auth_status,
     )
     from mcp_hub.auth import (
+        get_command_source,
         get_secret,
         resolve_auth,
         set_secret,
@@ -412,28 +416,25 @@ async def _handle_authenticate(
 
     # Elicitation path
     host = state.host_session if state is not None else None
-    stored_count = 0
     failed_secrets = []
 
-    for secret in auth.secrets:
-        if secret.state != "present":
-            continue
-        if get_secret(server_name, secret.env_var) is not None:
-            stored_count += 1
-            continue  # already stored, skip unless we want to re-auth
-
-    # Check if all secrets are already stored (force re-collects regardless)
     present_secrets = [s for s in auth.secrets if s.state == "present"]
-    all_stored = all(get_secret(server_name, s.env_var) is not None for s in present_secrets)
-    if all_stored and present_secrets and not force:
-        # Still invalidate to pick up fresh creds
+    keychain_secrets = [
+        s for s in present_secrets if get_command_source(server_name, s.env_var) is None
+    ]
+    needed = [s for s in keychain_secrets if force or get_secret(server_name, s.env_var) is None]
+    if not needed and present_secrets:
         await proxy.invalidate_server(server_name)
+        status = get_auth_status(server_name, auth)
         return _text(
             {
-                "status": "already_authenticated",
+                "status": "configured"
+                if status["status"] == "configured"
+                else "already_authenticated",
                 "server": server_name,
-                "message": "All secrets already stored. Server session refreshed.",
+                "message": "Credential sources ready. Server session refreshed; commands run on connect.",
                 "session": "refreshed",
+                "auth": status,
             }
         )
 
@@ -447,10 +448,7 @@ async def _handle_authenticate(
         )
 
     # Try elicitation for each missing secret (force re-collects stored ones too)
-    for secret in present_secrets:
-        if get_secret(server_name, secret.env_var) is not None and not force:
-            continue  # already have it
-
+    for secret in needed:
         schema: dict[str, Any] = {
             "type": "object",
             "properties": {
@@ -518,7 +516,7 @@ async def _handle_authenticate(
     final_status = get_auth_status(server_name, auth)
     return _text(
         {
-            "status": "authenticated",
+            "status": final_status["status"],
             "server": server_name,
             "source": source,
             "session": "refreshed",

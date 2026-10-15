@@ -61,14 +61,16 @@ class _SessionHolder:
     async def run(self) -> None:
         """Open transport + ClientSession, park until shutdown, then close."""
         try:
-            async with _open_transport(self.spec) as streams:
+            async with await _open_transport(self.spec) as streams:
                 read, write = streams
                 async with ClientSession(read, write, **self.session_kwargs) as session:
                     await session.initialize()
                     self.session = session
                     self.ready.set()
                     await self.shutdown.wait()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            self.error = exc
+            self.ready.set()
             raise
         except BaseException as exc:
             self.error = exc
@@ -76,7 +78,7 @@ class _SessionHolder:
             raise
 
 
-def _open_transport(spec: ServerSpec):
+async def _open_transport(spec: ServerSpec):
     """Return the async context manager for the spec's transport layer."""
     if spec.transport == "stdio":
         if not spec.command:
@@ -86,7 +88,7 @@ def _open_transport(spec: ServerSpec):
         injected: dict[str, str] = {}
         auth = resolve_auth(spec.name, spec.auth)
         if auth:
-            injected = resolve_secrets(spec.name, auth)
+            injected = await resolve_secrets(spec.name, auth)
         env = {**os.environ, **spec.env, **injected}
         params = StdioServerParameters(
             command=spec.command,
@@ -238,6 +240,8 @@ class ProxyClient:
         if holder.error is not None:
             # Drop the holder so the next call can retry with a fresh task.
             self._holders.pop(name, None)
+            if holder.task is not None and holder.task.done():
+                holder.task.exception()
             raise holder.error
         assert holder.session is not None
         return holder.session

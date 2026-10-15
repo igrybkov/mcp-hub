@@ -51,6 +51,40 @@ Each key is the env var name injected into the child on spawn. The value is a di
 
 The legacy list format (`- env_var: KEY`) is still accepted for backward compatibility.
 
+### Per-user credential commands
+
+For a stdio server's present, declared or learned secret, register a local
+credential source without editing shared or generated configs:
+
+```bash
+mcp-hub auth source set corp-jira JIRA_API_TOKEN -- \
+  /opt/homebrew/bin/op read 'op://Work/Jira API/credential'
+mcp-hub auth source status corp-jira
+mcp-hub auth source remove corp-jira JIRA_API_TOKEN
+```
+
+Registration stores only the argument list in the OS keychain under service
+`mcp-hub:credential-sources`, keyed by server and environment variable. It
+applies across projects using that server name. Never put secret values in
+the command arguments or retrieve real credentials through the assistant.
+
+The command runs without a shell on each new child connection, with closed
+stdin, a 10-second timeout, and a 64 KiB stdout limit. It must return nonempty
+UTF-8 without NUL characters; only trailing CR/LF is removed. Use absolute
+executable paths and arrange provider authentication outside the chat.
+Failures block connection without falling back to a stored value; output and
+stderr are not exposed in errors.
+
+Status does not execute commands: command-managed entries are unverified,
+and a fully configured server with command sources has status `configured`.
+`provision` and `authenticate` skip those entries even when forced. Removing
+a source restores keychain resolution without deleting the previous value;
+`auth rm` and `state: absent` delete both.
+
+After registration, removal, or rotation, call `reload` with
+`{"server": "corp-jira"}` or restart the hub. Global reload preserves unchanged
+connections. HTTP/SSE and servers connected directly to a host bypass this feature.
+
 ## Secret-vs-env decision rules
 
 **→ `auth.secrets` (keychain):** API keys, access tokens, refresh tokens,
