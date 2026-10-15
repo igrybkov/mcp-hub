@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 from mcp import MCPError, types
@@ -214,6 +215,7 @@ async def test_stderr_capture_is_bounded_redacted_and_closed(monkeypatch, tmp_pa
     monkeypatch.setattr("mcp_hub.auth.LEARNED_AUTH_PATH", tmp_path / "learned-auth.json")
     secret = "test-secret-not-a-real-password"
     monkeypatch.setattr("mcp_hub.auth.get_secret", lambda *args: secret)
+    monkeypatch.setattr("mcp_hub.auth.get_command_source", lambda *args: None)
     spec = ServerSpec(
         name="broken",
         transport="stdio",
@@ -226,7 +228,7 @@ async def test_stderr_capture_is_bounded_redacted_and_closed(monkeypatch, tmp_pa
         ],
         auth=AuthConfig(secrets=[SecretSpec(env_var="PASSWORD", label="Password")]),
     )
-    transport = _open_transport(spec)
+    transport = await _open_transport(spec)
     with pytest.raises(ExceptionGroup) as caught:
         async with transport:
             await asyncio.sleep(0.2)
@@ -252,7 +254,9 @@ async def test_failed_connection_can_retry_after_child_is_fixed(monkeypatch, tmp
             await asyncio.wait_for(proxy.session("child"), timeout=10)
 
         monkeypatch.setattr("mcp_hub.proxy.ClientSession", lambda *args, **kwargs: _ReadySession())
-        monkeypatch.setattr("mcp_hub.proxy._open_transport", lambda spec: _FakeTransport())
+        monkeypatch.setattr(
+            "mcp_hub.proxy._open_transport", AsyncMock(return_value=_FakeTransport())
+        )
         assert await asyncio.wait_for(proxy.session("child"), timeout=10)
 
 
@@ -296,8 +300,8 @@ async def test_cancelling_startup_closes_stderr_capture(monkeypatch, tmp_path) -
         command=sys.executable,
         args=["-c", "import time; time.sleep(30)"],
     )
-    transport = _open_transport(spec)
-    monkeypatch.setattr("mcp_hub.proxy._open_transport", lambda spec: transport)
+    transport = await _open_transport(spec)
+    monkeypatch.setattr("mcp_hub.proxy._open_transport", AsyncMock(return_value=transport))
     holder = _SessionHolder(spec)
     task = asyncio.create_task(holder.run())
     await asyncio.sleep(0.2)
@@ -305,7 +309,8 @@ async def test_cancelling_startup_closes_stderr_capture(monkeypatch, tmp_path) -
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=10)
 
-    assert holder.error is None
+    assert isinstance(holder.error, asyncio.CancelledError)
+    assert holder.ready.is_set()
     assert transport.capture.writer.closed
     assert transport.capture.reader.closed
     assert not transport.capture.thread.is_alive()
@@ -371,20 +376,20 @@ class _ReadySession:
 # --- transport selection ---
 
 
-def test_stdio_without_command_is_rejected() -> None:
+async def test_stdio_without_command_is_rejected() -> None:
     with pytest.raises(ValueError, match="missing 'command'"):
-        _open_transport(ServerSpec(name="x", transport="stdio"))
+        await _open_transport(ServerSpec(name="x", transport="stdio"))
 
 
 @pytest.mark.parametrize("transport", ["streamable-http", "sse"])
-def test_url_transports_require_a_url(transport: str) -> None:
+async def test_url_transports_require_a_url(transport: str) -> None:
     with pytest.raises(ValueError, match="missing 'url'"):
-        _open_transport(ServerSpec(name="x", transport=transport))
+        await _open_transport(ServerSpec(name="x", transport=transport))
 
 
-def test_unknown_transport_is_rejected() -> None:
+async def test_unknown_transport_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported transport"):
-        _open_transport(ServerSpec(name="x", transport="carrier-pigeon"))
+        await _open_transport(ServerSpec(name="x", transport="carrier-pigeon"))
 
 
 # --- http adapter lifecycle ---

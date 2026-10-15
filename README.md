@@ -291,7 +291,7 @@ legacy:
 | `expose_prompts` | bool | all | `false` | Surface the child's prompts through the hub. |
 | `expose_resources` | bool | all | `false` | Surface the child's resources/templates through the hub. |
 | `connect_timeout_seconds` | number | exposed | `5.0` | Per-server connect + enumerate budget. Raise for slow/Docker cold starts. |
-| `auth.secrets` | list | all | — | Secret schema for keychain injection (see [Authentication](#authentication)). |
+| `auth.secrets` | map | all | — | Secret schema for keychain injection (see [Authentication](#authentication)). Keys are env var names. |
 
 ## Managing servers (agent workflow)
 
@@ -356,7 +356,7 @@ When you're unsure which server fits, `recommend_servers("deploy the staging bra
 Secrets are **never** stored in config files or passed through the model. Instead the hub uses a *schema-as-source-of-truth* model:
 
 1. A server declares which environment variables it needs in an `auth.secrets` block.
-2. Values are stored in your OS keychain (`keyring`; macOS Keychain, Windows Credential Locker, Secret Service, …) under the service name `mcp-hub`.
+2. By default, values are stored in your OS keychain (`keyring`; macOS Keychain, Windows Credential Locker, Secret Service, …) under the service name `mcp-hub`. You can register a local credential command instead.
 3. On spawn, the hub injects **only** the declared secrets into the child's environment.
 
 ```yaml
@@ -364,13 +364,13 @@ linear:
   command: linear-mcp
   auth:
     secrets:
-      - env_var: LINEAR_API_KEY
+      LINEAR_API_KEY:
         label: "Linear API key"
         create_url: "https://linear.app/settings/api"
         sensitive: true        # default; masks terminal input
 ```
 
-Each secret supports `env_var`, `label`, `create_url`, `sensitive` (default `true`), and `state` (`present` or `absent`; `absent` reconciles the value out of the keychain).
+Each secret entry uses the env var name as the key and supports `label`, `create_url`, `sensitive` (default `true`), and `state` (`present` or `absent`; `absent` reconciles the value out of the keychain). The legacy list format (`- env_var: KEY`) is still accepted for backward compatibility.
 
 ### Storing secrets
 
@@ -388,6 +388,49 @@ mcp-hub auth rm linear LINEAR_API_KEY
 ```
 
 By default `provision` skips secrets that are already in the keychain. Pass `--force` to re-prompt and overwrite them — use this to rotate an expired or revoked key. In-session, the `authenticate` tool takes an equivalent `force: true`.
+
+### Retrieving a secret with a command
+
+For stdio servers, register a per-user command for one of the server's declared
+or learned secrets. Shared server configs and installer-generated files stay
+unchanged:
+
+```bash
+mcp-hub auth source set corp-jira JIRA_API_TOKEN -- \
+  /opt/homebrew/bin/op read 'op://Work/Jira API/credential'
+mcp-hub auth source status corp-jira
+mcp-hub auth source remove corp-jira JIRA_API_TOKEN
+```
+
+Use your actual server name, environment variable, executable path, and secret
+reference. `set` stores only the argument list in a separate OS keychain service,
+`mcp-hub:credential-sources`; it does not run the command or store its output.
+The registration applies to that server name and variable across projects.
+`remove` deletes the registration without deleting any previously stored value.
+
+The hub runs the command without a shell each time it opens a child connection,
+then injects stdout as the secret. Only trailing CR/LF characters are removed.
+Commands must finish within 10 seconds and return a nonempty UTF-8 value without
+NUL characters, with at most 64 KiB of stdout. Failure blocks the connection;
+the hub never falls back to an old keychain value. Command output and stderr
+are not logged or returned in errors.
+
+Use absolute executable paths when a desktop client has a different `PATH`.
+Commands run non-interactively, so configure `op` authentication out of band
+(for example, using its desktop app integration). Register only trusted commands,
+and pass secret references rather than secret values as arguments.
+
+`auth status` reports command sources as `command (unverified)`. A server with
+all sources configured and at least one command has status `configured`, not
+`authenticated`; status never executes commands. CLI provisioning and MCP
+`authenticate` skip command-managed secrets even with `--force` / `force: true`.
+`auth rm` and `state: absent` remove both the stored value and command registration.
+
+After registering/removing a source or rotating its value, call the MCP `reload`
+tool with `{"server": "corp-jira"}` or restart the hub. Existing child processes
+keep their current environment until reconnected. A global reload does not
+reconnect servers whose config is unchanged. HTTP/SSE headers and servers wired
+directly into a host rather than through the hub are not supported by this feature.
 
 ### Learned schemas
 

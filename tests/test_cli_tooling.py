@@ -120,7 +120,7 @@ def test_add_from_json_moves_secret_to_keychain_schema(
     # Secret moved out of env, value dropped; non-secret env kept.
     assert "MDB_MCP_CONNECTION_STRING" not in entry.get("env", {})
     assert entry["env"] == {"MDB_LOG_PATH": "/tmp/log"}
-    assert entry["auth"]["secrets"][0]["env_var"] == "MDB_MCP_CONNECTION_STRING"
+    assert "MDB_MCP_CONNECTION_STRING" in entry["auth"]["secrets"]
     assert entry["args"] == ["-y", "mongodb-mcp-server@latest", "--readOnly"]
 
     from mcp_hub.config import load_servers
@@ -193,9 +193,9 @@ def test_add_secret_flag_with_label_and_url(runner, tmp_path):
         ],
     )
     assert result.exit_code == 0, result.output + result.stderr
-    secret = yaml.safe_load(cfg.read_text())["linear"]["auth"]["secrets"][0]
-    assert secret == {
-        "env_var": "LINEAR_API_KEY",
+    secrets = yaml.safe_load(cfg.read_text())["linear"]["auth"]["secrets"]
+    assert "LINEAR_API_KEY" in secrets
+    assert secrets["LINEAR_API_KEY"] == {
         "label": "Linear API key",
         "create_url": "https://linear.app/settings/api",
     }

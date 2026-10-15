@@ -15,8 +15,8 @@ do the same things:
 - **CLI** (in a shell): `mcp-hub list | search | tools | call | add | validate |
   config path | auth | reload-equivalent (restart) | skill`.
 
-Secrets never go in config files — they live in the OS keychain. This is the
-single most important rule when adding a server.
+Secrets never go in config files. They live in the OS keychain or are retrieved
+by a per-user credential command when a child connects.
 
 For exhaustive field docs, worked examples, and a troubleshooting matrix, read
 [reference.md](reference.md) (or run `mcp-hub skill show mcp-hub`).
@@ -117,6 +117,13 @@ mcp-hub auth provision mongodb        # prompts for each secret, stores in keych
 
 In an MCP session use the `authenticate` tool instead (prompts via elicitation;
 the value never enters the model's context).
+
+For a stdio secret supplied by 1Password or another credential CLI, use
+`mcp-hub auth source set <server> <env_var> -- <executable> <args...>` instead.
+This registers a local command without editing server config; it runs only
+when connecting, and provisioning skips that secret even with `--force`.
+Never retrieve real credentials through the assistant. See
+[reference.md](reference.md#per-user-credential-commands) for limits and removal.
 
 **Step 4 — validate, then make it live:**
 

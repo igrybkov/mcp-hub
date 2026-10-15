@@ -36,17 +36,54 @@ file's format.
 | `expose_prompts` | bool | all | `false` | Surface the child's prompts natively through the hub. |
 | `expose_resources` | bool | all | `false` | Surface the child's resources/templates natively. |
 | `connect_timeout_seconds` | number | exposed | `5.0` | Connect + enumerate budget. Raise for docker/uvx cold starts. |
-| `auth.secrets` | list | all | — | Secret schema for keychain injection (see below). |
+| `auth.secrets` | map | all | — | Secret schema for keychain injection (see below). Keys are env var names. |
 
 ### `auth.secrets` entry
 
+Each key is the env var name injected into the child on spawn. The value is a dict with:
+
 | Key | Required | Default | Description |
 | --- | --- | --- | --- |
-| `env_var` | yes | — | Env var name injected into the child on spawn. |
-| `label` | no | `env_var` | Human label shown when prompting. |
+| `label` | no | key name | Human label shown when prompting. |
 | `create_url` | no | — | Where the user gets the value (shown in prompts). |
 | `sensitive` | no | `true` | `true` masks terminal input; set `false` for per-user-but-not-secret values. |
 | `state` | no | `present` | `absent` reconciles the value out of the keychain. |
+
+The legacy list format (`- env_var: KEY`) is still accepted for backward compatibility.
+
+### Per-user credential commands
+
+For a stdio server's present, declared or learned secret, register a local
+credential source without editing shared or generated configs:
+
+```bash
+mcp-hub auth source set corp-jira JIRA_API_TOKEN -- \
+  /opt/homebrew/bin/op read 'op://Work/Jira API/credential'
+mcp-hub auth source status corp-jira
+mcp-hub auth source remove corp-jira JIRA_API_TOKEN
+```
+
+Registration stores only the argument list in the OS keychain under service
+`mcp-hub:credential-sources`, keyed by server and environment variable. It
+applies across projects using that server name. Never put secret values in
+the command arguments or retrieve real credentials through the assistant.
+
+The command runs without a shell on each new child connection, with closed
+stdin, a 10-second timeout, and a 64 KiB stdout limit. It must return nonempty
+UTF-8 without NUL characters; only trailing CR/LF is removed. Use absolute
+executable paths and arrange provider authentication outside the chat.
+Failures block connection without falling back to a stored value; output and
+stderr are not exposed in errors.
+
+Status does not execute commands: command-managed entries are unverified,
+and a fully configured server with command sources has status `configured`.
+`provision` and `authenticate` skip those entries even when forced. Removing
+a source restores keychain resolution without deleting the previous value;
+`auth rm` and `state: absent` delete both.
+
+After registration, removal, or rotation, call `reload` with
+`{"server": "corp-jira"}` or restart the hub. Global reload preserves unchanged
+connections. HTTP/SSE and servers connected directly to a host bypass this feature.
 
 ## Secret-vs-env decision rules
 
@@ -85,7 +122,7 @@ linear:
   args: ["-y", "linear-mcp-server"]
   auth:
     secrets:
-      - env_var: LINEAR_API_KEY
+      LINEAR_API_KEY:
         label: "Linear API key"
         create_url: "https://linear.app/settings/api"
   description: "Linear — issues, projects, cycles."
@@ -108,7 +145,7 @@ acme:
   tags: [saas]
   auth:
     secrets:
-      - env_var: ACME_TOKEN
+      ACME_TOKEN:
         label: "Acme API token"
 ```
 
@@ -160,7 +197,7 @@ stripe:
     STRIPE_API_BASE: https://api.stripe.com   # not secret → stays in env
   auth:
     secrets:
-      - env_var: STRIPE_SECRET_KEY            # secret → moved to keychain, value dropped
+      STRIPE_SECRET_KEY:                      # secret → moved to keychain, value dropped
         label: Stripe Secret Key
 ```
 

@@ -121,7 +121,7 @@ class _SessionHolder:
         """Open transport + ClientSession, park until shutdown, then close."""
         transport = None
         try:
-            transport = _open_transport(self.spec)
+            transport = await _open_transport(self.spec)
             async with transport as streams:
                 read, write = streams
                 async with ClientSession(read, write, **self.session_kwargs) as session:
@@ -129,7 +129,9 @@ class _SessionHolder:
                     self.session = session
                     self.ready.set()
                     await self.shutdown.wait()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            self.error = exc
+            self.ready.set()
             raise
         except Exception as exc:
             detail = _exception_detail(exc)
@@ -143,7 +145,7 @@ class _SessionHolder:
             self.ready.set()  # unblock waiter so it can see the error
 
 
-def _open_transport(spec: ServerSpec):
+async def _open_transport(spec: ServerSpec):
     """Return the async context manager for the spec's transport layer."""
     if spec.transport == "stdio":
         if not spec.command:
@@ -153,7 +155,7 @@ def _open_transport(spec: ServerSpec):
         injected: dict[str, str] = {}
         auth = resolve_auth(spec.name, spec.auth)
         if auth:
-            injected = resolve_secrets(spec.name, auth)
+            injected = await resolve_secrets(spec.name, auth)
         env = {**os.environ, **spec.env, **injected}
         params = StdioServerParameters(
             command=spec.command,

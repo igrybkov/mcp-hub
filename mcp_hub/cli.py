@@ -423,7 +423,60 @@ def cmd_search(query: str, limit: int, load: bool) -> None:
 
 @main.group("auth")
 def cmd_auth() -> None:
-    """Manage keychain secrets for MCP servers."""
+    """Manage secrets and local credential commands for MCP servers."""
+
+
+@cmd_auth.group("source")
+def cmd_auth_source() -> None:
+    """Manage per-user credential commands without editing server config."""
+
+
+@cmd_auth_source.command("set")
+@click.argument("server")
+@click.argument("env_var")
+@click.argument("command", nargs=-1, required=True)
+def cmd_auth_source_set(server: str, env_var: str, command: tuple[str, ...]) -> None:
+    """Register COMMAND for SERVER/ENV_VAR. Use -- before the executable."""
+    from mcp_hub.auth import resolve_auth, set_command_source
+
+    servers = load_servers()
+    if server not in servers:
+        _die(f"unknown server: {server}")
+    spec = servers[server]
+    if spec.transport != "stdio":
+        _die("credential commands are supported only for stdio servers")
+    auth = resolve_auth(server, spec.auth)
+    if auth is None or not any(s.env_var == env_var and s.state == "present" for s in auth.secrets):
+        _die(f"{server}/{env_var} is not a present auth schema entry")
+    try:
+        set_command_source(server, env_var, list(command))
+    except (ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"Registered command source for {server}/{env_var} (not executed).")
+    click.echo(f"Reload server '{server}' or restart the hub to use it.")
+
+
+@cmd_auth_source.command("status")
+@click.argument("server")
+def cmd_auth_source_status(server: str) -> None:
+    """Show credential sources for SERVER without executing them."""
+    ctx = click.get_current_context()
+    ctx.invoke(cmd_auth_status, server=server)
+
+
+@cmd_auth_source.command("remove")
+@click.argument("server")
+@click.argument("env_var")
+def cmd_auth_source_remove(server: str, env_var: str) -> None:
+    """Remove a command source, leaving any stored secret unchanged."""
+    from mcp_hub.auth import delete_command_source
+
+    try:
+        delete_command_source(server, env_var)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"Removed command source for {server}/{env_var}; keychain resolution restored.")
+    click.echo(f"Reload server '{server}' or restart the hub to use the change.")
 
 
 @cmd_auth.command("status")
@@ -450,17 +503,19 @@ def cmd_auth_status(server: str | None) -> None:
                     name,
                     s["env_var"],
                     s["label"],
-                    "✓" if s["stored"] else "✗",
+                    "command (unverified)"
+                    if s["source"] == "command"
+                    else ("keychain (stored)" if s["stored"] else "keychain (missing)"),
                     status["status"],
                 )
             )
     if not rows:
         click.echo("No servers with auth schemas found.")
         return
-    click.echo(f"{'SERVER':<25} {'ENV_VAR':<40} {'LABEL':<35} {'STORED':<8} {'STATUS'}")
-    click.echo("-" * 115)
-    for name, env_var, label, stored, status_val in rows:
-        click.echo(f"{name:<25} {env_var:<40} {label:<35} {stored:<8} {status_val}")
+    click.echo(f"{'SERVER':<25} {'ENV_VAR':<40} {'LABEL':<35} {'SOURCE':<22} {'STATUS'}")
+    click.echo("-" * 135)
+    for name, env_var, label, source, status_val in rows:
+        click.echo(f"{name:<25} {env_var:<40} {label:<35} {source:<22} {status_val}")
 
 
 @cmd_auth.command("provision")
@@ -478,7 +533,7 @@ def cmd_auth_status(server: str | None) -> None:
 )
 def cmd_auth_provision(server: str | None, all_servers: bool, force: bool) -> None:
     """Collect and store secrets for SERVER (or all servers with --all)."""
-    from mcp_hub.auth import get_secret, resolve_auth, set_secret
+    from mcp_hub.auth import get_command_source, get_secret, resolve_auth, set_secret
 
     servers = load_servers()
     targets: list[str] = []
@@ -511,6 +566,9 @@ def cmd_auth_provision(server: str | None, all_servers: bool, force: bool) -> No
             continue
         click.echo(f"\n--- {name} ---")
         for secret in present:
+            if get_command_source(name, secret.env_var) is not None:
+                click.echo(f"  {secret.label} ({secret.env_var}): command-managed [skip]")
+                continue
             existing = get_secret(name, secret.env_var)
             if existing is not None and not force:
                 click.echo(f"  {secret.label} ({secret.env_var}): already stored [skip]")
@@ -541,7 +599,7 @@ def cmd_auth_provision(server: str | None, all_servers: bool, force: bool) -> No
                 click.echo("  Skipped (empty input)")
 
     click.echo(
-        "\nDone. If mcp-hub is running, call the 'reload' tool or restart to pick up changes."
+        "\nDone. If mcp-hub is running, reload the target server or restart to pick up changes."
     )
 
 
@@ -550,18 +608,15 @@ def cmd_auth_provision(server: str | None, all_servers: bool, force: bool) -> No
 @click.argument("env_var", required=False)
 def cmd_auth_rm(server: str, env_var: str | None) -> None:
     """Delete stored secret(s) for SERVER. If ENV_VAR given, remove only that secret."""
-    from mcp_hub.auth import delete_learned, delete_secret, get_secret
+    from mcp_hub.auth import delete_learned, delete_secret
 
     servers = load_servers()
     if server not in servers:
         _die(f"unknown server: {server}")
 
     if env_var:
-        if get_secret(server, env_var) is None:
-            click.echo(f"No secret stored for {server}/{env_var}")
-        else:
-            delete_secret(server, env_var)
-            click.echo(f"Deleted {server}/{env_var} from keychain")
+        delete_secret(server, env_var)
+        click.echo(f"Removed secret and command source for {server}/{env_var}")
         delete_learned(server, env_var)
     else:
         from mcp_hub.auth import resolve_auth
@@ -570,15 +625,10 @@ def cmd_auth_rm(server: str, env_var: str | None) -> None:
         if auth is None:
             click.echo(f"No auth schema for server '{server}'")
             return
-        removed = 0
         for s in auth.secrets:
-            if get_secret(server, s.env_var) is not None:
-                delete_secret(server, s.env_var)
-                click.echo(f"Deleted {server}/{s.env_var}")
-                removed += 1
+            delete_secret(server, s.env_var)
+            click.echo(f"Removed secret and command source for {server}/{s.env_var}")
         delete_learned(server)
-        if removed == 0:
-            click.echo(f"No secrets stored for '{server}'")
 
 
 @cmd_auth.command("promote")
@@ -595,7 +645,7 @@ def cmd_auth_promote(server: str) -> None:
     click.echo("auth:")
     click.echo("  secrets:")
     for s in auth.secrets:
-        click.echo(f"    - env_var: {s.env_var}")
+        click.echo(f"    {s.env_var}:")
         click.echo(f"      label: {s.label}")
         if s.create_url:
             click.echo(f"      create_url: {s.create_url}")
@@ -994,7 +1044,11 @@ def _build_entry(
         if env:
             entry["env"] = env
     if secrets:
-        entry["auth"] = {"secrets": secrets}
+        entry["auth"] = {
+            "secrets": {
+                s["env_var"]: {k: v for k, v in s.items() if k != "env_var"} for s in secrets
+            }
+        }
     if description:
         entry["description"] = description
     if tags:
@@ -1106,16 +1160,13 @@ def cmd_add(
     seen: set[str] = set()
     base_auth = base.get("auth")
     if isinstance(base_auth, dict):
-        for s in base_auth.get("secrets") or []:
-            if isinstance(s, dict) and s.get("env_var"):
-                secrets.append(
-                    {
-                        k: v
-                        for k, v in s.items()
-                        if k in ("env_var", "label", "create_url", "sensitive")
-                    }
-                )
-                seen.add(s["env_var"])
+        from mcp_hub.auth import _parse_secrets_raw
+
+        for s in _parse_secrets_raw(base_auth.get("secrets") or {}):
+            secrets.append(
+                {k: v for k, v in s.items() if k in ("env_var", "label", "create_url", "sensitive")}
+            )
+            seen.add(s["env_var"])
 
     if expose_prompts is None:
         expose_prompts = bool(base.get("expose_prompts", False))
