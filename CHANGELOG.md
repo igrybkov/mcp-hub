@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.1 (2026-10-15)
+
+### Bug Fixes
+
+- **proxy**: Surface child startup errors through MCP
+  ([`2194f92`](https://github.com/igrybkov/mcp-hub/commit/2194f9280236ffb45a7384795f5e707150cbbca0))
+
+
 ## v1.0.0 (2026-07-29)
 
 ### Bug Fixes
