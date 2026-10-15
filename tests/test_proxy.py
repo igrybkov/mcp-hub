@@ -7,13 +7,19 @@ covered here.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import sys
+
 import pytest
 from mcp import MCPError, types
 from mcp_hub.config import ServerSpec
 from mcp_hub.proxy import (
     METHOD_NOT_FOUND,
+    STDERR_TAIL_LIMIT,
     ProxyClient,
     _build_http_client,
+    _exception_detail,
     _HttpAdapter,
     _is_method_not_found,
     _open_transport,
@@ -163,6 +169,203 @@ async def test_closed_proxy_refuses_new_sessions(seeded) -> None:
 
     with pytest.raises(RuntimeError, match="closed"):
         await proxy.session("child")
+
+
+def test_nested_exception_groups_show_leaf_errors() -> None:
+    error = ExceptionGroup(
+        "task group",
+        [ValueError("bad config"), ExceptionGroup("nested", [OSError("connection refused")])],
+    )
+
+    assert _exception_detail(error) == "ValueError: bad config; OSError: connection refused"
+
+
+@pytest.mark.parametrize("operation", ["get_server_tools", "call_tool"])
+async def test_child_startup_error_reaches_meta_tools(operation, monkeypatch, tmp_path) -> None:
+    from mcp_hub.tools import handle_tool
+
+    monkeypatch.setattr("mcp_hub.auth.LEARNED_AUTH_PATH", tmp_path / "learned-auth.json")
+    spec = ServerSpec(
+        name="broken",
+        transport="stdio",
+        command=sys.executable,
+        args=[
+            "-c",
+            "import sys; sys.stderr.write('Authentication failed: HTTP 401\\n'); sys.exit(1)",
+        ],
+    )
+    async with ProxyClient({"broken": spec}) as proxy:
+        arguments = {"server": "broken", "tool": "unused"}
+        result = await asyncio.wait_for(
+            handle_tool(operation, arguments, {"broken": spec}, proxy), timeout=10
+        )
+
+        error = json.loads(result[0].text)["error"]
+        assert "server 'broken' failed to connect" in error
+        assert "Authentication failed: HTTP 401" in error
+        assert "Connection closed" in error
+        assert "unhandled errors in a TaskGroup" not in error
+        assert "broken" not in proxy._holders
+
+
+async def test_stderr_capture_is_bounded_redacted_and_closed(monkeypatch, tmp_path, capsys) -> None:
+    from mcp_hub.auth import AuthConfig, SecretSpec
+
+    monkeypatch.setattr("mcp_hub.auth.LEARNED_AUTH_PATH", tmp_path / "learned-auth.json")
+    secret = "test-secret-not-a-real-password"
+    monkeypatch.setattr("mcp_hub.auth.get_secret", lambda *args: secret)
+    spec = ServerSpec(
+        name="broken",
+        transport="stdio",
+        command=sys.executable,
+        args=[
+            "-c",
+            "import os, sys; "
+            "sys.stderr.write('x' * 20000 + '\\npassword=' + os.environ['PASSWORD'] + '\\n'); "
+            "sys.exit(1)",
+        ],
+        auth=AuthConfig(secrets=[SecretSpec(env_var="PASSWORD", label="Password")]),
+    )
+    transport = _open_transport(spec)
+    with pytest.raises(ExceptionGroup) as caught:
+        async with transport:
+            await asyncio.sleep(0.2)
+            raise RuntimeError("initialization failed")
+
+    assert "initialization failed" in _exception_detail(caught.value)
+    assert len(transport.capture.tail) <= STDERR_TAIL_LIMIT
+    assert secret not in transport.capture.tail
+    assert "[REDACTED]" in transport.capture.tail
+    assert "[REDACTED]" in capsys.readouterr().err
+    assert transport.capture.writer.closed
+    assert transport.capture.reader.closed
+    assert not transport.capture.thread.is_alive()
+
+
+async def test_failed_connection_can_retry_after_child_is_fixed(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("mcp_hub.auth.LEARNED_AUTH_PATH", tmp_path / "learned-auth.json")
+    spec = ServerSpec(
+        name="child", transport="stdio", command=sys.executable, args=["-c", "raise SystemExit(1)"]
+    )
+    async with ProxyClient({"child": spec}) as proxy:
+        with pytest.raises(RuntimeError, match="failed to connect"):
+            await asyncio.wait_for(proxy.session("child"), timeout=10)
+
+        monkeypatch.setattr("mcp_hub.proxy.ClientSession", lambda *args, **kwargs: _ReadySession())
+        monkeypatch.setattr("mcp_hub.proxy._open_transport", lambda spec: _FakeTransport())
+        assert await asyncio.wait_for(proxy.session("child"), timeout=10)
+
+
+async def test_healthy_stdio_child_still_lists_tools(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("mcp_hub.auth.LEARNED_AUTH_PATH", tmp_path / "learned-auth.json")
+    code = """
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        result = {
+            "protocolVersion": request["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "healthy", "version": "1"},
+        }
+    else:
+        result = {"tools": [{"name": "ready", "inputSchema": {"type": "object"}}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"""
+    spec = ServerSpec(name="healthy", transport="stdio", command=sys.executable, args=["-c", code])
+    async with ProxyClient({"healthy": spec}) as proxy:
+        tools = await asyncio.wait_for(proxy.list_tools("healthy"), timeout=10)
+        assert [tool.name for tool in tools] == ["ready"]
+
+
+async def test_missing_executable_reports_the_leaf_error(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("mcp_hub.auth.LEARNED_AUTH_PATH", tmp_path / "learned-auth.json")
+    spec = ServerSpec(name="missing", transport="stdio", command=str(tmp_path / "missing"))
+    async with ProxyClient({"missing": spec}) as proxy:
+        with pytest.raises(RuntimeError, match="FileNotFoundError"):
+            await asyncio.wait_for(proxy.session("missing"), timeout=10)
+
+
+async def test_cancelling_startup_closes_stderr_capture(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("mcp_hub.auth.LEARNED_AUTH_PATH", tmp_path / "learned-auth.json")
+    spec = ServerSpec(
+        name="slow",
+        transport="stdio",
+        command=sys.executable,
+        args=["-c", "import time; time.sleep(30)"],
+    )
+    transport = _open_transport(spec)
+    monkeypatch.setattr("mcp_hub.proxy._open_transport", lambda spec: transport)
+    holder = _SessionHolder(spec)
+    task = asyncio.create_task(holder.run())
+    await asyncio.sleep(0.2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=10)
+
+    assert holder.error is None
+    assert transport.capture.writer.closed
+    assert transport.capture.reader.closed
+    assert not transport.capture.thread.is_alive()
+
+
+async def test_redaction_handles_secrets_larger_than_read_chunks(capsys) -> None:
+    from mcp_hub.proxy import _StderrCapture
+
+    secret = "s" * 6000
+    capture = _StderrCapture([secret])
+    capture.writer.write("before=" + secret + ";after")
+    capture.writer.flush()
+    await capture.close()
+
+    assert capture.tail == "before=[REDACTED];after"
+    assert capsys.readouterr().err == capture.tail
+
+
+async def test_startup_error_crosses_hub_jsonrpc(tmp_path) -> None:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    config = tmp_path / "servers.json"
+    config.write_text(
+        json.dumps(
+            {
+                "broken": {
+                    "command": sys.executable,
+                    "args": [
+                        "-c",
+                        "import sys; sys.stderr.write('Authentication failed: HTTP 401\\n'); sys.exit(1)",
+                    ],
+                }
+            }
+        )
+    )
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "mcp_hub.cli", "server"],
+        env={"CONFIG_FILE": str(config), "MCP_HUB_LOG_FILE": str(tmp_path / "hub.log")},
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        result = await asyncio.wait_for(
+            session.call_tool("get_server_tools", {"server": "broken"}), timeout=10
+        )
+        error = json.loads(result.content[0].text)["error"]
+        assert "Authentication failed: HTTP 401" in error
+        assert "unhandled errors in a TaskGroup" not in error
+
+
+class _ReadySession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def initialize(self):
+        return None
 
 
 # --- transport selection ---

@@ -20,8 +20,11 @@ as an async context manager bounded to the main task.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import logging
 import os
+import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -48,6 +51,55 @@ MCP_DEFAULT_SSE_READ_TIMEOUT = 300.0
 # Example: logging_callback, sampling_callback, elicitation_callback, etc.
 SessionCallbackFactory = Callable[[str], dict[str, Any]]
 
+STDERR_TAIL_LIMIT = 8192
+
+
+def _exception_detail(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(_exception_detail(child) for child in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
+
+
+class _StderrCapture:
+    """Relay child stderr and retain a redacted tail for connection failures."""
+
+    def __init__(self, secrets: list[str]) -> None:
+        self.secrets = sorted(set(filter(None, secrets)), key=len, reverse=True)
+        self.tail = ""
+        read_fd, write_fd = os.pipe()
+        self.reader = os.fdopen(read_fd, encoding="utf-8", errors="replace")
+        self.writer = os.fdopen(write_fd, "w", encoding="utf-8")
+        self.output = sys.stderr
+        self.thread = threading.Thread(target=self._drain, daemon=True)
+        self.thread.start()
+
+    def redact(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, "[REDACTED]")
+        return text
+
+    def _drain(self) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        keep = max((len(secret) - 1 for secret in self.secrets), default=0)
+        pending = ""
+        with self.reader:
+            while chunk := os.read(self.reader.fileno(), 4096):
+                pending = self.redact(pending + decoder.decode(chunk))
+                count = max(0, len(pending) - keep)
+                self._emit(pending[:count])
+                pending = pending[count:]
+            self._emit(self.redact(pending + decoder.decode(b"", final=True)))
+
+    def _emit(self, text: str) -> None:
+        if text:
+            self.tail = (self.tail + text)[-STDERR_TAIL_LIMIT:]
+            self.output.write(text)
+            self.output.flush()
+
+    async def close(self) -> None:
+        self.writer.close()
+        await asyncio.to_thread(self.thread.join)
+
 
 class _SessionHolder:
     """Per-server connection lifecycle — lives in its own task."""
@@ -67,8 +119,10 @@ class _SessionHolder:
 
     async def run(self) -> None:
         """Open transport + ClientSession, park until shutdown, then close."""
+        transport = None
         try:
-            async with _open_transport(self.spec) as streams:
+            transport = _open_transport(self.spec)
+            async with transport as streams:
                 read, write = streams
                 async with ClientSession(read, write, **self.session_kwargs) as session:
                     await session.initialize()
@@ -77,10 +131,16 @@ class _SessionHolder:
                     await self.shutdown.wait()
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:
-            self.error = exc
+        except Exception as exc:
+            detail = _exception_detail(exc)
+            capture = getattr(transport, "capture", None)
+            if capture is not None:
+                detail = capture.redact(detail)
+                if capture.tail.strip():
+                    detail += f"\nChild stderr (last {STDERR_TAIL_LIMIT} characters):\n{capture.tail.strip()}"
+            self.error = RuntimeError(f"server {self.spec.name!r} failed to connect: {detail}")
+            self.error.__cause__ = exc
             self.ready.set()  # unblock waiter so it can see the error
-            raise
 
 
 def _open_transport(spec: ServerSpec):
@@ -100,7 +160,9 @@ def _open_transport(spec: ServerSpec):
             args=list(spec.args),
             env=env,
         )
-        return _StdioAdapter(stdio_client(params))
+        secrets = [env[s.env_var] for s in auth.secrets if s.env_var in env] if auth else []
+        capture = _StderrCapture(secrets)
+        return _StdioAdapter(stdio_client(params, errlog=capture.writer), capture)
     if spec.transport == "streamable-http":
         if not spec.url:
             raise ValueError(f"server {spec.name!r} missing 'url'")
@@ -115,15 +177,25 @@ def _open_transport(spec: ServerSpec):
 class _StdioAdapter:
     """Normalize (read, write) yielding across transports."""
 
-    def __init__(self, cm) -> None:
+    def __init__(self, cm, capture: _StderrCapture | None = None) -> None:
         self._cm = cm
+        self.capture = capture
 
     async def __aenter__(self):
-        self._streams = await self._cm.__aenter__()
+        try:
+            self._streams = await self._cm.__aenter__()
+        except BaseException:
+            if self.capture is not None:
+                await self.capture.close()
+            raise
         return self._streams
 
     async def __aexit__(self, *exc):
-        return await self._cm.__aexit__(*exc)
+        try:
+            return await self._cm.__aexit__(*exc)
+        finally:
+            if self.capture is not None:
+                await self.capture.close()
 
 
 class _SseAdapter(_StdioAdapter):
