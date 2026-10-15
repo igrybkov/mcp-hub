@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 
 from mcp import types
-from mcp.shared.context import RequestContext
+from mcp.client.session import ClientRequestContext
 
 from mcp_hub.state import HubState
 
@@ -41,7 +41,7 @@ def make_list_roots_callback(state: HubState, server_name: str):
     """
 
     async def callback(
-        ctx: RequestContext,
+        ctx: ClientRequestContext,
     ) -> types.ListRootsResult | types.ErrorData:
         host = state.host_session
         if host is None:

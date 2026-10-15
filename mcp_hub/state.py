@@ -2,8 +2,10 @@
 
 The host's ServerSession is created inside `Server.run()` by the SDK and not
 directly exposed. To send background notifications (prompts/list_changed,
-resources/list_changed), we capture the session from the first handler's
-RequestContext and reuse that reference for subsequent notifications.
+resources/list_changed), we capture the session from the `ServerRequestContext`
+the SDK hands each handler, and reuse that reference for subsequent
+notifications. `server.py` does the capture at the handler boundary, so the
+handler modules themselves stay free of SDK context plumbing.
 
 The cold-start event gates the first `list_prompts` / `list_resources` call:
 

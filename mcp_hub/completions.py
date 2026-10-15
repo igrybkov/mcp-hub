@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 
-from mcp import McpError, types
+from mcp import MCPError, types
 
 from mcp_hub.namespace import (
     NamespaceError,
@@ -48,7 +48,7 @@ async def handle_complete(
     context_args = context.arguments if context is not None else None
     try:
         result = await session.complete(child_ref, arg_payload, context_args)
-    except McpError as exc:
+    except MCPError as exc:
         if _is_method_not_found(exc):
             return None
         raise

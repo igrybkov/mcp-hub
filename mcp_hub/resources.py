@@ -6,10 +6,10 @@ Resource URIs are rewritten so the host sees:
 
 On `read_resource`, the hub-URI is decoded back to (server, original_uri)
 and forwarded to the correct child. The child's `ReadResourceResult` is
-returned to the host as `Iterable[ReadResourceContents]`, which the SDK's
-`@read_resource` decorator expects.
+passed back to the host as-is apart from its URIs, which are re-stamped to
+the hub URI the host addressed (see `_restamp_uri`).
 
-Resource templates also have their `uriTemplate` rewritten so the host can
+Resource templates also have their `uri_template` rewritten so the host can
 construct hub URIs directly; the hub decodes them on read.
 """
 
@@ -17,12 +17,8 @@ from __future__ import annotations
 
 import logging
 import urllib.parse
-from collections.abc import Iterable
 
 from mcp import types
-from mcp.server.lowlevel.helper_types import ReadResourceContents
-from mcp.server.lowlevel.server import request_ctx
-from pydantic import AnyUrl
 
 from mcp_hub.namespace import (
     RESOURCE_PREFIX,
@@ -36,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_list_resources(state: HubState) -> list[types.Resource]:
-    _capture_session(state)
     await state.wait_for_cold_start_settle()
 
     resources: list[types.Resource] = []
@@ -51,14 +46,13 @@ async def handle_list_resources(state: HubState) -> list[types.Resource]:
             )
             continue
         rewritten_uri = encode_resource_uri(server_name, str(original.uri))
-        resources.append(original.model_copy(update={"uri": AnyUrl(rewritten_uri)}))
+        resources.append(original.model_copy(update={"uri": rewritten_uri}))
     return resources
 
 
 async def handle_list_resource_templates(
     state: HubState,
 ) -> list[types.ResourceTemplate]:
-    _capture_session(state)
     await state.wait_for_cold_start_settle()
 
     templates: list[types.ResourceTemplate] = []
@@ -72,13 +66,12 @@ async def handle_list_resource_templates(
                 exc,
             )
             continue
-        rewritten = _rewrite_template_uri(server_name, original.uriTemplate)
-        templates.append(original.model_copy(update={"uriTemplate": rewritten}))
+        rewritten = _rewrite_template_uri(server_name, original.uri_template)
+        templates.append(original.model_copy(update={"uri_template": rewritten}))
     return templates
 
 
-async def handle_read_resource(state: HubState, uri: AnyUrl) -> Iterable[ReadResourceContents]:
-    _capture_session(state)
+async def handle_read_resource(state: HubState, uri: str) -> types.ReadResourceResult:
     try:
         server_name, original_uri = decode_resource_uri(str(uri))
     except NamespaceError as exc:
@@ -88,7 +81,7 @@ async def handle_read_resource(state: HubState, uri: AnyUrl) -> Iterable[ReadRes
         raise ValueError(f"unknown server: {server_name!r}")
 
     result = await state.proxy.read_resource(server_name, original_uri)
-    return _convert_contents(result)
+    return _restamp_uri(result, uri)
 
 
 def _rewrite_template_uri(server_name: str, template: str) -> str:
@@ -107,36 +100,15 @@ def _rewrite_template_uri(server_name: str, template: str) -> str:
     return f"{RESOURCE_PREFIX}{server_name}/{quoted}"
 
 
-def _convert_contents(
-    result: types.ReadResourceResult,
-) -> list[ReadResourceContents]:
-    """Flatten ReadResourceResult's typed contents to the SDK helper type."""
-    out: list[ReadResourceContents] = []
-    for entry in result.contents:
-        if isinstance(entry, types.TextResourceContents):
-            out.append(
-                ReadResourceContents(
-                    content=entry.text,
-                    mime_type=entry.mimeType,
-                )
-            )
-        elif isinstance(entry, types.BlobResourceContents):
-            import base64
+def _restamp_uri(result: types.ReadResourceResult, uri: str) -> types.ReadResourceResult:
+    """Re-address the child's contents to the hub URI the host asked for.
 
-            out.append(
-                ReadResourceContents(
-                    content=base64.b64decode(entry.blob),
-                    mime_type=entry.mimeType or "application/octet-stream",
-                )
-            )
-        else:
-            logger.warning("unknown ReadResourceResult content type: %r", entry)
-    return out
-
-
-def _capture_session(state: HubState) -> None:
-    try:
-        ctx = request_ctx.get()
-    except LookupError:
-        return
-    state.capture_host_session(ctx.session)
+    The child answers with its own URI. Under mcp 1.x this never surfaced: the
+    `@read_resource()` decorator took a bare `Iterable[ReadResourceContents]`
+    and stamped the *requested* URI on the way out. mcp 2.0 hands the result
+    back verbatim, so without this the host would see the child's private URI
+    for a resource it addressed through the hub — and any re-read of that URI
+    would fail to route.
+    """
+    contents = [entry.model_copy(update={"uri": uri}) for entry in result.contents]
+    return result.model_copy(update={"contents": contents})

@@ -1,7 +1,7 @@
 """Lazy proxy client — maintains ClientSession per child server.
 
 Each connection is owned by a dedicated holder task. The holder opens its own
-`stdio_client` / `sse_client` / `streamablehttp_client` context and publishes
+`stdio_client` / `sse_client` / `streamable_http_client` context and publishes
 the ready `ClientSession` back to the pool. It waits on a shutdown event and
 tears the contexts down cleanly in its own task when that event fires.
 
@@ -20,15 +20,19 @@ as an async context manager bounded to the main task.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import logging
 import os
+import sys
+import threading
 from collections.abc import Callable
 from typing import Any
 
-from mcp import ClientSession, McpError, StdioServerParameters, types
+import httpx2
+from mcp import ClientSession, MCPError, StdioServerParameters, types
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from mcp_hub.config import ServerSpec
 
@@ -37,9 +41,64 @@ logger = logging.getLogger(__name__)
 
 METHOD_NOT_FOUND = -32601  # JSON-RPC standard code
 
+# Mirrors mcp.shared._httpx_utils. Copied rather than imported because that
+# module is private; `tests/test_proxy.py` asserts these still match the SDK's,
+# so drift shows up as a failing test rather than as wrong timeouts in prod.
+MCP_DEFAULT_TIMEOUT = 30.0
+MCP_DEFAULT_SSE_READ_TIMEOUT = 300.0
+
 # Factory returning ClientSession kwargs (callbacks) for a given server name.
 # Example: logging_callback, sampling_callback, elicitation_callback, etc.
 SessionCallbackFactory = Callable[[str], dict[str, Any]]
+
+STDERR_TAIL_LIMIT = 8192
+
+
+def _exception_detail(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(_exception_detail(child) for child in exc.exceptions)
+    return f"{type(exc).__name__}: {exc}"
+
+
+class _StderrCapture:
+    """Relay child stderr and retain a redacted tail for connection failures."""
+
+    def __init__(self, secrets: list[str]) -> None:
+        self.secrets = sorted(set(filter(None, secrets)), key=len, reverse=True)
+        self.tail = ""
+        read_fd, write_fd = os.pipe()
+        self.reader = os.fdopen(read_fd, encoding="utf-8", errors="replace")
+        self.writer = os.fdopen(write_fd, "w", encoding="utf-8")
+        self.output = sys.stderr
+        self.thread = threading.Thread(target=self._drain, daemon=True)
+        self.thread.start()
+
+    def redact(self, text: str) -> str:
+        for secret in self.secrets:
+            text = text.replace(secret, "[REDACTED]")
+        return text
+
+    def _drain(self) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        keep = max((len(secret) - 1 for secret in self.secrets), default=0)
+        pending = ""
+        with self.reader:
+            while chunk := os.read(self.reader.fileno(), 4096):
+                pending = self.redact(pending + decoder.decode(chunk))
+                count = max(0, len(pending) - keep)
+                self._emit(pending[:count])
+                pending = pending[count:]
+            self._emit(self.redact(pending + decoder.decode(b"", final=True)))
+
+    def _emit(self, text: str) -> None:
+        if text:
+            self.tail = (self.tail + text)[-STDERR_TAIL_LIMIT:]
+            self.output.write(text)
+            self.output.flush()
+
+    async def close(self) -> None:
+        self.writer.close()
+        await asyncio.to_thread(self.thread.join)
 
 
 class _SessionHolder:
@@ -60,8 +119,10 @@ class _SessionHolder:
 
     async def run(self) -> None:
         """Open transport + ClientSession, park until shutdown, then close."""
+        transport = None
         try:
-            async with await _open_transport(self.spec) as streams:
+            transport = await _open_transport(self.spec)
+            async with transport as streams:
                 read, write = streams
                 async with ClientSession(read, write, **self.session_kwargs) as session:
                     await session.initialize()
@@ -72,10 +133,16 @@ class _SessionHolder:
             self.error = exc
             self.ready.set()
             raise
-        except BaseException as exc:
-            self.error = exc
+        except Exception as exc:
+            detail = _exception_detail(exc)
+            capture = getattr(transport, "capture", None)
+            if capture is not None:
+                detail = capture.redact(detail)
+                if capture.tail.strip():
+                    detail += f"\nChild stderr (last {STDERR_TAIL_LIMIT} characters):\n{capture.tail.strip()}"
+            self.error = RuntimeError(f"server {self.spec.name!r} failed to connect: {detail}")
+            self.error.__cause__ = exc
             self.ready.set()  # unblock waiter so it can see the error
-            raise
 
 
 async def _open_transport(spec: ServerSpec):
@@ -95,11 +162,13 @@ async def _open_transport(spec: ServerSpec):
             args=list(spec.args),
             env=env,
         )
-        return _StdioAdapter(stdio_client(params))
+        secrets = [env[s.env_var] for s in auth.secrets if s.env_var in env] if auth else []
+        capture = _StderrCapture(secrets)
+        return _StdioAdapter(stdio_client(params, errlog=capture.writer), capture)
     if spec.transport == "streamable-http":
         if not spec.url:
             raise ValueError(f"server {spec.name!r} missing 'url'")
-        return _HttpAdapter(streamablehttp_client(spec.url, headers=spec.headers or None))
+        return _HttpAdapter(spec.url, spec.headers or None)
     if spec.transport == "sse":
         if not spec.url:
             raise ValueError(f"server {spec.name!r} missing 'url'")
@@ -110,33 +179,98 @@ async def _open_transport(spec: ServerSpec):
 class _StdioAdapter:
     """Normalize (read, write) yielding across transports."""
 
-    def __init__(self, cm) -> None:
+    def __init__(self, cm, capture: _StderrCapture | None = None) -> None:
         self._cm = cm
+        self.capture = capture
 
     async def __aenter__(self):
-        self._streams = await self._cm.__aenter__()
+        try:
+            self._streams = await self._cm.__aenter__()
+        except BaseException:
+            if self.capture is not None:
+                await self.capture.close()
+            raise
         return self._streams
 
     async def __aexit__(self, *exc):
-        return await self._cm.__aexit__(*exc)
+        try:
+            return await self._cm.__aexit__(*exc)
+        finally:
+            if self.capture is not None:
+                await self.capture.close()
 
 
 class _SseAdapter(_StdioAdapter):
     """Same shape as stdio — already yields (read, write)."""
 
 
-class _HttpAdapter:
-    """`streamablehttp_client` yields (read, write, session_id_fn)."""
+def _build_http_client(headers: dict[str, str]) -> httpx2.AsyncClient:
+    """Build the httpx client the streamable-http transport will borrow.
 
-    def __init__(self, cm) -> None:
-        self._cm = cm
+    Reproduces `mcp.shared._httpx_utils.create_mcp_http_client`, which the SDK
+    keeps private. All three settings are load-bearing: httpx2 defaults
+    `follow_redirects` to False, and its default 5s read timeout would cut off
+    long-lived SSE streams.
+
+    Kept honest by `tests/test_proxy.py::test_http_client_matches_sdk_defaults`
+    — don't delete that test without replacing the guarantee.
+    """
+    return httpx2.AsyncClient(
+        follow_redirects=True,
+        timeout=httpx2.Timeout(MCP_DEFAULT_TIMEOUT, read=MCP_DEFAULT_SSE_READ_TIMEOUT),
+        headers=headers,
+    )
+
+
+class _HttpAdapter:
+    """`streamable_http_client` yields (read, write).
+
+    mcp 2.0 dropped this transport's `headers=` argument in favour of a
+    caller-supplied `httpx2.AsyncClient`, and deliberately does *not* close a
+    client it didn't create. So when the spec carries headers we build the
+    client here and own its lifecycle: opened in `__aenter__` and closed in
+    `__aexit__`, both of which the holder task drives — same task in, same
+    task out, per this module's cancel-scope invariant.
+
+    With no headers we pass nothing, letting the transport create and manage
+    its own client with the SDK's recommended MCP timeouts.
+    """
+
+    def __init__(self, url: str, headers: dict[str, str] | None) -> None:
+        self._url = url
+        self._headers = headers
+        self._client = None
+        self._cm = None
 
     async def __aenter__(self):
-        read, write, _ = await self._cm.__aenter__()
+        if self._headers:
+            self._client = _build_http_client(self._headers)
+            await self._client.__aenter__()
+        try:
+            self._cm = streamable_http_client(self._url, http_client=self._client)
+            read, write = await self._cm.__aenter__()
+        except BaseException:
+            # `async with` skips __aexit__ when __aenter__ raises, so a client
+            # we already opened has to be released right here. Connect failures
+            # are routine (unreachable URL, bad auth) and the holder retries on
+            # the next call, so leaking one httpx client per attempt adds up.
+            self._cm = None
+            await self._close_client()
+            raise
         return read, write
 
     async def __aexit__(self, *exc):
-        return await self._cm.__aexit__(*exc)
+        try:
+            if self._cm is not None:
+                return await self._cm.__aexit__(*exc)
+            return None
+        finally:
+            await self._close_client()
+
+    async def _close_client(self) -> None:
+        if self._client is not None:
+            client, self._client = self._client, None
+            await client.__aexit__(None, None, None)
 
 
 class ProxyClient:
@@ -240,8 +374,6 @@ class ProxyClient:
         if holder.error is not None:
             # Drop the holder so the next call can retry with a fresh task.
             self._holders.pop(name, None)
-            if holder.task is not None and holder.task.done():
-                holder.task.exception()
             raise holder.error
         assert holder.session is not None
         return holder.session
@@ -270,7 +402,7 @@ class ProxyClient:
         session = await self.session(name)
         try:
             result = await session.list_prompts()
-        except McpError as exc:
+        except MCPError as exc:
             if _is_method_not_found(exc):
                 return []
             raise
@@ -288,7 +420,7 @@ class ProxyClient:
         session = await self.session(name)
         try:
             result = await session.list_resources()
-        except McpError as exc:
+        except MCPError as exc:
             if _is_method_not_found(exc):
                 return []
             raise
@@ -298,21 +430,23 @@ class ProxyClient:
         session = await self.session(name)
         try:
             result = await session.list_resource_templates()
-        except McpError as exc:
+        except MCPError as exc:
             if _is_method_not_found(exc):
                 return []
             raise
-        return list(result.resourceTemplates)
+        return list(result.resource_templates)
 
     async def read_resource(self, name: str, uri: str) -> types.ReadResourceResult:
         session = await self.session(name)
-        from pydantic import AnyUrl
-
-        return await session.read_resource(AnyUrl(uri))
+        return await session.read_resource(uri)
 
 
-def _is_method_not_found(err: McpError) -> bool:
-    """Treat `method not found` as "this server doesn't support the primitive.\""""
-    data = getattr(err, "error", None)
-    code = getattr(data, "code", None) if data is not None else None
-    return code == METHOD_NOT_FOUND
+def _is_method_not_found(err: MCPError) -> bool:
+    """Treat `method not found` as "this server doesn't support the primitive."
+
+    Reads the public `MCPError.code` rather than probing for `.error` with
+    `getattr` defaults. Five call sites use this to degrade gracefully to an
+    empty list; under the old defaulting form an SDK rename would have made
+    every one of them silently start raising instead.
+    """
+    return err.code == METHOD_NOT_FOUND

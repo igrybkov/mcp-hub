@@ -570,7 +570,7 @@ Commit message prefixes that affect versioning:
 
 ## Troubleshooting
 
-- **A child won't start / connection error.** Run the child's `command` by hand to confirm it works, then `mcp-hub tools <server>` — the child's own stderr is surfaced. Detailed logs are at `~/Library/Logs/mcp-hub.log` (or `$MCP_HUB_LOG_FILE`).
+- **A child won't start / connection error.** Errors name the server and the underlying exception, including nested task-group failures. For stdio children, MCP tool errors also include the last 8,192 characters of child stderr; values named by `auth.secrets` are redacted. Child stderr is still relayed to the hub's stderr. Run `mcp-hub tools <server>` to reproduce outside your MCP client. Detailed logs are at `~/Library/Logs/mcp-hub.log` (or `$MCP_HUB_LOG_FILE`).
 - **Edited config isn't picked up.** Call the `reload` tool (or restart the host). Adding the *first* exposed server requires a host reconnect to register the prompts/resources capability.
 - **A server needs more startup time.** Raise its `connect_timeout_seconds` (slow Docker images especially).
 - **Auth says "partial".** One or more declared secrets aren't stored yet — run `mcp-hub auth provision <server>` or the `authenticate` tool.

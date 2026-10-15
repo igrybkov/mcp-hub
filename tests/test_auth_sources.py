@@ -494,27 +494,27 @@ async def test_connection_injects_secret_and_targeted_reload_picks_up_rotation(
 ):
     server_path = tmp_path / "child.py"
     server_path.write_text("""
-import asyncio
+import json
 import os
-from mcp import types
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
+import sys
 
-server = Server("auth-source-test")
-
-@server.list_tools()
-async def list_tools():
-    return [types.Tool(name="read", description="Read test environment", inputSchema={"type": "object"})]
-
-@server.call_tool()
-async def call_tool(name, arguments):
-    return [types.TextContent(type="text", text=os.environ["TOKEN"] + ":" + os.environ["SETTING"])]
-
-async def main():
-    async with stdio_server() as (read, write):
-        await server.run(read, write, server.create_initialization_options())
-
-asyncio.run(main())
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "initialize":
+        result = {
+            "protocolVersion": request["params"]["protocolVersion"],
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "auth-source-test", "version": "1"},
+        }
+    elif request["method"] == "tools/call":
+        result = {"content": [{
+            "type": "text", "text": os.environ["TOKEN"] + ":" + os.environ["SETTING"],
+        }]}
+    else:
+        result = {"tools": [{"name": "read", "inputSchema": {"type": "object"}}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
 """)
     value_path = tmp_path / "value"
     value_path.write_text("first")
@@ -568,6 +568,29 @@ async def test_mcp_connection_error_does_not_expose_command_output(config, caplo
         )
     assert "exited with status 1" in result[0].text
     assert "do-not-leak" not in result[0].text + caplog.text
+
+
+async def test_child_startup_diagnostics_redact_command_credentials(config, caplog, capsys):
+    auth.set_command_source("example", "TOKEN", command("print('command-secret-not-real')"))
+    servers = load_servers()
+    servers["example"].command = sys.executable
+    servers["example"].args = [
+        "-c",
+        "import os, sys; sys.stderr.write('token=' + os.environ['TOKEN']); sys.exit(1)",
+    ]
+    async with ProxyClient(servers) as proxy:
+        result = await handle_tool(
+            "call_tool",
+            {
+                "server": "example",
+                "tool": "anything",
+            },
+            servers,
+            proxy,
+        )
+    diagnostic = result[0].text + caplog.text + capsys.readouterr().err
+    assert "[REDACTED]" in diagnostic
+    assert "command-secret-not-real" not in diagnostic
 
 
 async def test_failed_connection_can_retry_with_a_new_source(schema):

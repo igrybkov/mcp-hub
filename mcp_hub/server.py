@@ -16,17 +16,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any
 
 from dotenv import load_dotenv
 from mcp import types
-from mcp.server import NotificationOptions, Server
+from mcp.server import InitializationOptions, NotificationOptions, Server
+from mcp.server.context import ServerRequestContext
 from mcp.server.stdio import stdio_server
-from pydantic import AnyUrl
+from mcp.shared.exceptions import UrlElicitationRequiredError
 
 from mcp_hub.catalog import DEFAULT_CATALOG_PATH, Catalog
 from mcp_hub.completions import handle_complete
-from mcp_hub.config import compute_config_hash, load_servers
+from mcp_hub.config import ServerSpec, compute_config_hash, load_servers
 from mcp_hub.instructions import build_instructions
 from mcp_hub.logging_relay import handle_set_logging_level, make_logging_callback
 from mcp_hub.prompts import handle_get_prompt, handle_list_prompts
@@ -69,6 +69,168 @@ def _configure_logging(verbose: bool = False) -> None:
     )
 
 
+def build_app(
+    servers: dict[str, ServerSpec],
+    proxy: ProxyClient,
+    state: HubState,
+    instructions: str,
+) -> tuple[Server, InitializationOptions]:
+    """Wire the MCP handlers and return the server plus its init options.
+
+    Split out of `_main` so the handlers are reachable from tests — under mcp
+    2.0 they are plain callables passed to `Server(...)`, but as closures
+    inside `_main` nothing could get at them without opening a real
+    `ProxyClient` and binding stdio.
+
+    Returning the init options alongside the server is deliberate:
+    `any_exposed` decides both which `on_*` handlers are supplied and what
+    `NotificationOptions` advertises, and those two have to agree. Computing it
+    once here makes disagreement structurally impossible.
+
+    `servers` and `proxy` are passed explicitly even though `state` already
+    holds both, so the handler bodies read exactly as they did inside `_main`.
+    Collapsing them is a separate change.
+    """
+    any_exposed = any(s.is_exposed for s in servers.values())
+
+    # mcp 2.0 hands every handler a ServerRequestContext instead of
+    # exposing the old `request_ctx` contextvar. `ctx.session` is the host
+    # ServerSession we need for background notifications, so each handler
+    # captures it on the way in — idempotent, and it lets the handler
+    # modules stay free of SDK context plumbing.
+    def _capture(ctx: ServerRequestContext) -> None:
+        state.capture_host_session(ctx.session)
+
+    async def on_list_tools(
+        ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+    ) -> types.ListToolsResult:
+        _capture(ctx)
+        return types.ListToolsResult(tools=get_hub_tools())
+
+    async def on_call_tool(
+        ctx: ServerRequestContext, params: types.CallToolRequestParams
+    ) -> types.CallToolResult:
+        _capture(ctx)
+        try:
+            content = await handle_tool(
+                params.name, params.arguments or {}, servers, proxy, state=state
+            )
+        except UrlElicitationRequiredError:
+            # Carries its own protocol-level handling (error code -32042).
+            raise
+        except Exception as exc:
+            # 1.x's `@call_tool()` decorator turned any handler exception
+            # into an isError result; 2.0's `on_call_tool` does not. Without
+            # this an unexpected raise reaches the host as a JSON-RPC error
+            # — a failed *request* rather than a failed *tool call* — which
+            # hosts surface far more harshly. Keep the old contract.
+            logger.exception("call_tool(%s) failed", params.name)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=str(exc))],
+                is_error=True,
+            )
+        return types.CallToolResult(content=list(content))
+
+    async def on_set_logging_level(
+        ctx: ServerRequestContext, params: types.SetLevelRequestParams
+    ) -> types.EmptyResult:
+        _capture(ctx)
+        await handle_set_logging_level(state, params.level)
+        return types.EmptyResult()
+
+    # Fan the host's roots/list_changed out to every connected child.
+    async def on_roots_list_changed(
+        ctx: ServerRequestContext, params: types.NotificationParams | None
+    ) -> None:
+        _capture(ctx)
+        await handle_roots_list_changed(state)
+
+    async def on_list_prompts(
+        ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+    ) -> types.ListPromptsResult:
+        _capture(ctx)
+        return types.ListPromptsResult(prompts=await handle_list_prompts(state))
+
+    async def on_get_prompt(
+        ctx: ServerRequestContext, params: types.GetPromptRequestParams
+    ) -> types.GetPromptResult:
+        _capture(ctx)
+        return await handle_get_prompt(state, params.name, params.arguments)
+
+    async def on_list_resources(
+        ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+    ) -> types.ListResourcesResult:
+        _capture(ctx)
+        return types.ListResourcesResult(resources=await handle_list_resources(state))
+
+    async def on_list_resource_templates(
+        ctx: ServerRequestContext, params: types.PaginatedRequestParams | None
+    ) -> types.ListResourceTemplatesResult:
+        _capture(ctx)
+        return types.ListResourceTemplatesResult(
+            resource_templates=await handle_list_resource_templates(state)
+        )
+
+    async def on_read_resource(
+        ctx: ServerRequestContext, params: types.ReadResourceRequestParams
+    ) -> types.ReadResourceResult:
+        _capture(ctx)
+        return await handle_read_resource(state, params.uri)
+
+    async def on_completion(
+        ctx: ServerRequestContext, params: types.CompleteRequestParams
+    ) -> types.CompleteResult:
+        _capture(ctx)
+        completion = await handle_complete(state, params.ref, params.argument, params.context)
+        # `handle_complete` returns None when the ref isn't ours to route
+        # or the child has no completion support. 1.x's decorator turned
+        # that into an empty completion; 2.0 wants a result object, so do
+        # the same explicitly rather than sending None over the wire.
+        if completion is None:
+            return types.CompleteResult(completion=types.Completion(values=[]))
+        return types.CompleteResult(completion=completion)
+
+    # Prompt/resource handlers are only wired when at least one server opts
+    # in. If none do, the hub advertises only tools (exactly as before), so
+    # the host's UI stays clean. Under mcp 2.0 the advertised capabilities
+    # follow from which `on_*` handlers are supplied, so passing None here
+    # is what gates them — the same role the decorators played in 1.x.
+    exposed_handlers = (
+        {
+            "on_list_prompts": on_list_prompts,
+            "on_get_prompt": on_get_prompt,
+            "on_list_resources": on_list_resources,
+            "on_list_resource_templates": on_list_resource_templates,
+            "on_read_resource": on_read_resource,
+            "on_completion": on_completion,
+        }
+        if any_exposed
+        else {}
+    )
+
+    app: Server = Server(
+        "mcp-hub",
+        instructions=instructions,
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+        # Logging relay is always on — child log events surface to the host
+        # regardless of whether prompts/resources are exposed, so long as
+        # the child is connected for some reason.
+        on_set_logging_level=on_set_logging_level,
+        on_roots_list_changed=on_roots_list_changed,
+        **exposed_handlers,
+    )
+
+    init_options = app.create_initialization_options(
+        notification_options=NotificationOptions(
+            prompts_changed=any_exposed,
+            resources_changed=any_exposed,
+            tools_changed=False,
+        ),
+    )
+    return app, init_options
+
+
 async def _main() -> None:
     servers = load_servers()
     logger.info("Loaded %d server(s)", len(servers))
@@ -78,14 +240,6 @@ async def _main() -> None:
     catalog = Catalog(DEFAULT_CATALOG_PATH)
     warm = catalog.load(config_hash)
     catalog.set_config_hash(config_hash)
-
-    any_exposed = any(s.is_exposed for s in servers.values())
-
-    app: Server = Server("mcp-hub", instructions=instructions)
-
-    @app.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        return get_hub_tools()
 
     async with ProxyClient(servers) as proxy:
         state = HubState(servers=servers, catalog=catalog, proxy=proxy)
@@ -102,14 +256,6 @@ async def _main() -> None:
             }
         )
 
-        # Observe host roots/list_changed notifications and fan out to children.
-        # This is a notification handler (not a request handler), so we plug
-        # directly into the Server's notification_handlers dict.
-        async def _on_roots_list_changed(_: types.RootsListChangedNotification) -> None:
-            await handle_roots_list_changed(state)
-
-        app.notification_handlers[types.RootsListChangedNotification] = _on_roots_list_changed
-
         # Warm start: serve cached catalog immediately, refresh in background.
         # Cold start: handlers will wait up to the soft timeout for the
         # background enumeration to settle.
@@ -122,64 +268,13 @@ async def _main() -> None:
         else:
             logger.info("cold start: no cache (or config changed) — enumerating")
 
-        @app.call_tool()
-        async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-            return await handle_tool(name, arguments or {}, servers, proxy, state=state)
-
-        # Prompt/resource handlers are only registered when at least one
-        # server opts in. If none opt in, the hub advertises only tools
-        # (exactly as before), so the host's UI stays clean.
-        if any_exposed:
-
-            @app.list_prompts()
-            async def list_prompts() -> list[types.Prompt]:
-                return await handle_list_prompts(state)
-
-            @app.get_prompt()
-            async def get_prompt(
-                name: str, arguments: dict[str, str] | None
-            ) -> types.GetPromptResult:
-                return await handle_get_prompt(state, name, arguments)
-
-            @app.list_resources()
-            async def list_resources() -> list[types.Resource]:
-                return await handle_list_resources(state)
-
-            @app.list_resource_templates()
-            async def list_resource_templates() -> list[types.ResourceTemplate]:
-                return await handle_list_resource_templates(state)
-
-            @app.read_resource()
-            async def read_resource(uri: AnyUrl):
-                return await handle_read_resource(state, uri)
-
-            @app.completion()
-            async def complete(
-                ref,
-                argument: types.CompletionArgument,
-                context: types.CompletionContext | None,
-            ):
-                return await handle_complete(state, ref, argument, context)
-
-        # Logging relay is always on — child log events surface to the host
-        # regardless of whether prompts/resources are exposed, so long as the
-        # child is connected for some reason (exposed enumeration, tool call).
-        @app.set_logging_level()
-        async def set_logging_level(level: types.LoggingLevel) -> None:
-            await handle_set_logging_level(state, level)
+        app, init_options = build_app(servers, proxy, state, instructions)
 
         # Start the recovery daemon that enumerates exposed servers,
         # retries on failure, and emits list_changed when entries update.
         await run_startup(state)
 
         try:
-            init_options = app.create_initialization_options(
-                notification_options=NotificationOptions(
-                    prompts_changed=any_exposed,
-                    resources_changed=any_exposed,
-                    tools_changed=False,
-                ),
-            )
             logger.info("Starting mcp-hub MCP server")
             async with stdio_server() as (read_stream, write_stream):
                 await app.run(read_stream, write_stream, init_options)

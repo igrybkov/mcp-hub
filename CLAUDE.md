@@ -58,7 +58,8 @@ The single entry point is `mcp_hub.cli:main`. `mcp-hub <command>` is the Click C
 
 ### Things to keep in mind when editing
 
-- Prompt/resource MCP handlers are only registered when at least one server is exposed (`any_exposed` in `server.py`); otherwise the hub advertises tools only. Adding the *first* exposed server changes advertised capabilities and requires a host reconnect.
+- Prompt/resource MCP handlers are only wired when at least one server is exposed (`any_exposed` in `server.py`); otherwise the hub advertises tools only. Adding the *first* exposed server changes advertised capabilities and requires a host reconnect. Under mcp 2.0 the lowlevel `Server` takes handlers as `on_*` constructor kwargs (`(ctx, params)` in, a full result object out) rather than the 1.x decorators — advertised capabilities follow from which kwargs you pass, so the `any_exposed` conditional is what gates them.
+- Handlers get the host `ServerSession` from the `ServerRequestContext` the SDK passes in; there is no `request_ctx` contextvar any more. `server.py` calls `capture_host_session(ctx.session)` at the handler boundary so the handler modules stay free of SDK context plumbing.
 - `set_session_callbacks` must be installed before any `session()` call — existing holders don't pick up changes.
 - stdout is the stdio JSON-RPC channel; all logging goes to stderr + `~/Library/Logs/mcp-hub.log` (`MCP_HUB_LOG_FILE`). Never `print` to stdout from the server path.
 - Tests: `test_smoke.py` (imports/version) plus `test_cli_tooling.py` (the `add`/`validate`/`config path`/`skill` behavior, secret inference, and round-tripping through `load_servers()`). Async tests run under `asyncio_mode = "auto"` (pytest-asyncio).
