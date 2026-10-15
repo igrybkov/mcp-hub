@@ -42,6 +42,19 @@ class AuthConfig:
     secrets: list[SecretSpec] = field(default_factory=list)
 
 
+def _parse_secrets_raw(raw: Any) -> list[dict[str, Any]]:
+    """Parse secrets from dict (new) or list (legacy) format into a flat list.
+
+    New format:  {ENV_VAR: {label, create_url, sensitive, state}}
+    Legacy format: [{env_var, label, create_url, sensitive, state}]
+    """
+    if isinstance(raw, dict):
+        return [{"env_var": k, **v} for k, v in raw.items() if isinstance(v, dict)]
+    if isinstance(raw, list):
+        return [s for s in raw if isinstance(s, dict) and "env_var" in s]
+    return []
+
+
 def keychain_key(server: str, env_var: str) -> str:
     return f"{server}:{env_var}"
 
@@ -85,7 +98,7 @@ def load_learned() -> dict[str, AuthConfig]:
                     sensitive=s.get("sensitive", True),
                     state=s.get("state", "present"),
                 )
-                for s in auth_data.get("secrets", [])
+                for s in _parse_secrets_raw(auth_data.get("secrets", {}))
             ]
             result[server_name] = AuthConfig(secrets=secrets)
         return result
@@ -103,16 +116,15 @@ def save_learned(server: str, auth: AuthConfig) -> None:
         except Exception:
             pass
     existing[server] = {
-        "secrets": [
-            {
-                "env_var": s.env_var,
+        "secrets": {
+            s.env_var: {
                 "label": s.label,
                 **({"create_url": s.create_url} if s.create_url else {}),
                 "sensitive": s.sensitive,
                 "state": s.state,
             }
             for s in auth.secrets
-        ]
+        }
     }
     LEARNED_AUTH_PATH.write_text(json.dumps(existing, indent=2))
 
@@ -127,9 +139,12 @@ def delete_learned(server: str, env_var: str | None = None) -> None:
         if env_var is None:
             del data[server]
         else:
-            data[server]["secrets"] = [
-                s for s in data[server].get("secrets", []) if s.get("env_var") != env_var
-            ]
+            secrets = data[server].get("secrets", {})
+            if isinstance(secrets, dict):
+                secrets.pop(env_var, None)
+                data[server]["secrets"] = secrets
+            else:
+                data[server]["secrets"] = [s for s in secrets if s.get("env_var") != env_var]
             if not data[server]["secrets"]:
                 del data[server]
         LEARNED_AUTH_PATH.write_text(json.dumps(data, indent=2))

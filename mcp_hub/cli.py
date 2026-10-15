@@ -595,7 +595,7 @@ def cmd_auth_promote(server: str) -> None:
     click.echo("auth:")
     click.echo("  secrets:")
     for s in auth.secrets:
-        click.echo(f"    - env_var: {s.env_var}")
+        click.echo(f"    {s.env_var}:")
         click.echo(f"      label: {s.label}")
         if s.create_url:
             click.echo(f"      create_url: {s.create_url}")
@@ -994,7 +994,11 @@ def _build_entry(
         if env:
             entry["env"] = env
     if secrets:
-        entry["auth"] = {"secrets": secrets}
+        entry["auth"] = {
+            "secrets": {
+                s["env_var"]: {k: v for k, v in s.items() if k != "env_var"} for s in secrets
+            }
+        }
     if description:
         entry["description"] = description
     if tags:
@@ -1106,16 +1110,13 @@ def cmd_add(
     seen: set[str] = set()
     base_auth = base.get("auth")
     if isinstance(base_auth, dict):
-        for s in base_auth.get("secrets") or []:
-            if isinstance(s, dict) and s.get("env_var"):
-                secrets.append(
-                    {
-                        k: v
-                        for k, v in s.items()
-                        if k in ("env_var", "label", "create_url", "sensitive")
-                    }
-                )
-                seen.add(s["env_var"])
+        from mcp_hub.auth import _parse_secrets_raw
+
+        for s in _parse_secrets_raw(base_auth.get("secrets") or {}):
+            secrets.append(
+                {k: v for k, v in s.items() if k in ("env_var", "label", "create_url", "sensitive")}
+            )
+            seen.add(s["env_var"])
 
     if expose_prompts is None:
         expose_prompts = bool(base.get("expose_prompts", False))

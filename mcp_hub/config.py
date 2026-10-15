@@ -49,7 +49,7 @@ from typing import Any
 
 import yaml
 
-from mcp_hub.auth import AuthConfig, SecretSpec, reconcile_absent, resolve_auth
+from mcp_hub.auth import AuthConfig, SecretSpec, _parse_secrets_raw, reconcile_absent, resolve_auth
 
 logger = logging.getLogger(__name__)
 
@@ -105,18 +105,16 @@ class ServerSpec:
         auth: AuthConfig | None = None
         auth_data = data.get("auth")
         if auth_data and isinstance(auth_data, dict):
-            secrets = []
-            for s in auth_data.get("secrets", []):
-                if isinstance(s, dict) and "env_var" in s:
-                    secrets.append(
-                        SecretSpec(
-                            env_var=s["env_var"],
-                            label=s.get("label", s["env_var"]),
-                            create_url=s.get("create_url"),
-                            sensitive=bool(s.get("sensitive", True)),
-                            state=s.get("state", "present"),
-                        )
-                    )
+            secrets = [
+                SecretSpec(
+                    env_var=s["env_var"],
+                    label=s.get("label", s["env_var"]),
+                    create_url=s.get("create_url"),
+                    sensitive=bool(s.get("sensitive", True)),
+                    state=s.get("state", "present"),
+                )
+                for s in _parse_secrets_raw(auth_data.get("secrets", {}))
+            ]
             auth = AuthConfig(secrets=secrets) if secrets else None
         if "url" in data:
             transport = data.get("transport", "streamable-http")

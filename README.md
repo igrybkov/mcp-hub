@@ -291,7 +291,7 @@ legacy:
 | `expose_prompts` | bool | all | `false` | Surface the child's prompts through the hub. |
 | `expose_resources` | bool | all | `false` | Surface the child's resources/templates through the hub. |
 | `connect_timeout_seconds` | number | exposed | `5.0` | Per-server connect + enumerate budget. Raise for slow/Docker cold starts. |
-| `auth.secrets` | list | all | — | Secret schema for keychain injection (see [Authentication](#authentication)). |
+| `auth.secrets` | map | all | — | Secret schema for keychain injection (see [Authentication](#authentication)). Keys are env var names. |
 
 ## Managing servers (agent workflow)
 
@@ -364,13 +364,13 @@ linear:
   command: linear-mcp
   auth:
     secrets:
-      - env_var: LINEAR_API_KEY
+      LINEAR_API_KEY:
         label: "Linear API key"
         create_url: "https://linear.app/settings/api"
         sensitive: true        # default; masks terminal input
 ```
 
-Each secret supports `env_var`, `label`, `create_url`, `sensitive` (default `true`), and `state` (`present` or `absent`; `absent` reconciles the value out of the keychain).
+Each secret entry uses the env var name as the key and supports `label`, `create_url`, `sensitive` (default `true`), and `state` (`present` or `absent`; `absent` reconciles the value out of the keychain). The legacy list format (`- env_var: KEY`) is still accepted for backward compatibility.
 
 ### Storing secrets
 
