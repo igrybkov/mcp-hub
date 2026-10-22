@@ -41,7 +41,7 @@ dev = [
   # pre-1.0 ruff minors promote lint rules and change formatter style. Keep this
   # minor in lockstep with the ruff-pre-commit `rev` in .pre-commit-config.yaml,
   # or CI's `ruff format --check` drifts from what the hook considers clean.
-  "ruff~=0.16.0",
+  "ruff~=0.17.2",
   "pre-commit~=4.0",
 ]
 
