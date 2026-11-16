@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.2 (2026-11-16)
+
+### Bug Fixes
+
+- **server**: Keep stdio on the handshake path after a modern-envelope probe
+  ([`ca7a9e7`](https://github.com/igrybkov/mcp-hub/commit/ca7a9e79422d0877c001c0c30b8dcb8568de9603))
+
+
 ## v1.0.1 (2026-10-15)
 
 ### Bug Fixes
