@@ -27,6 +27,7 @@ from mcp.shared.exceptions import UrlElicitationRequiredError
 from mcp_hub.catalog import DEFAULT_CATALOG_PATH, Catalog
 from mcp_hub.completions import handle_complete
 from mcp_hub.config import ServerSpec, compute_config_hash, load_servers
+from mcp_hub.handshake_guard import guard_handshake
 from mcp_hub.instructions import build_instructions
 from mcp_hub.logging_relay import handle_set_logging_level, make_logging_callback
 from mcp_hub.prompts import handle_get_prompt, handle_list_prompts
@@ -277,7 +278,8 @@ async def _main() -> None:
         try:
             logger.info("Starting mcp-hub MCP server")
             async with stdio_server() as (read_stream, write_stream):
-                await app.run(read_stream, write_stream, init_options)
+                async with guard_handshake(read_stream, write_stream) as guarded:
+                    await app.run(guarded, write_stream, init_options)
         finally:
             await state.shutdown()
 
