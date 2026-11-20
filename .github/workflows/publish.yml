@@ -44,7 +44,7 @@ jobs:
         if: steps.release.outputs.released == 'true'
         run: uv build
 
-      - uses: python-semantic-release/publish-action@v10.5.3
+      - uses: python-semantic-release/publish-action@v10.7.0
         if: steps.release.outputs.released == 'true'
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
